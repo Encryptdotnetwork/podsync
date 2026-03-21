@@ -69,6 +69,19 @@ func ParseURL(link string) (model.Info, error) {
 		return info, nil
 	}
 
+	if strings.HasSuffix(parsed.Host, "odysee.com") {
+		kind, id, err := parseOdyseeURL(parsed)
+		if err != nil {
+			return model.Info{}, err
+		}
+
+		info.Provider = model.ProviderOdysee
+		info.LinkType = kind
+		info.ItemID = id
+
+		return info, nil
+	}
+
 	return model.Info{}, errors.New("unsupported URL host")
 }
 
@@ -238,6 +251,32 @@ func parseTwitchURL(parsed *url.URL) (model.Type, string, error) {
 	if id == "" {
 		return "", "", errors.New("invalid id")
 	}
+
+	return kind, id, nil
+}
+
+func parseOdyseeURL(parsed *url.URL) (model.Type, string, error) {
+	// - https://odysee.com/@theduran:e
+	// - https://odysee.com/@theduran:e/video-name
+	path := parsed.EscapedPath()
+	parts := strings.Split(path, "/")
+
+	if len(parts) < 2 {
+		return "", "", errors.New("invalid odysee path")
+	}
+
+	handle := parts[1]
+	if handle == "" || !strings.HasPrefix(handle, "@") {
+		return "", "", errors.New("invalid odysee handle format")
+	}
+
+	// Extract the channel ID (everything after @ including the :xxx suffix)
+	id := strings.TrimPrefix(handle, "@")
+	if id == "" {
+		return "", "", errors.New("empty odysee channel id")
+	}
+
+	kind := model.TypeChannel
 
 	return kind, id, nil
 }
