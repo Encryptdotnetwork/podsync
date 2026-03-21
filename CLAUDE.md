@@ -284,6 +284,16 @@ debug = false
 - Requires `CLIENT_ID:CLIENT_SECRET` token format
 - Max 100 videos per request
 
+### Odysee (`pkg/builder/odysee.go`)
+- **Supported**: Channels (via RSS feeds)
+- **Feed Discovery**: Monitors Odysee RSS feeds for new content
+- No API key required - uses public RSS feeds
+- URL format: `https://odysee.com/@channel_name:channel_id`
+- Internally converts to RSS URL: `https://odysee.com/$/rss/@channel_name:channel_id`
+- Size estimation based on duration (no actual file size available in RSS)
+- youtube-dl/yt-dlp automatically handles Odysee video downloads
+- Respects `page_size` configuration for pagination
+
 ### API Key Rotation
 - All platforms support multiple keys for rotation
 - Round-robin rotation via `RotatedKeyProvider` in `pkg/feed/key.go`
