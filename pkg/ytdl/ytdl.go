@@ -42,6 +42,10 @@ type PlaylistEntry struct {
 	Thumbnail   string `json:"thumbnail"`
 	Url         string `json:"url"`
 	WebpageUrl  string `json:"webpage_url"`
+	// Additional fields that yt-dlp may provide
+	Ext           string                 `json:"ext"`
+	EpisodeNumber interface{}            `json:"episode_number"`
+	RawJson       map[string]interface{} `json:"-"` // Store raw JSON for debugging
 }
 
 type PlaylistMetadata struct {
