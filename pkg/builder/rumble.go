@@ -76,6 +76,8 @@ func (rb *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fe
 		return nil, errors.Wrapf(err, "failed to fetch Rumble playlist metadata from %s", rumbleURL)
 	}
 
+	log.Infof("Rumble metadata retrieved: title=%s, entries=%d, channel=%s", metadata.Title, len(metadata.Entries), metadata.Channel)
+
 	// Set feed metadata from yt-dlp output
 	_feed.Title = metadata.Title
 	if _feed.Title == "" {
@@ -111,15 +113,20 @@ func (rb *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fe
 
 func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, feedModel *model.Feed, metadata ytdl.PlaylistMetadata) error {
 	if len(metadata.Entries) == 0 {
-		log.Infof("Rumble feed initialized: %s with 0 episodes", feedModel.Title)
+		log.Infof("Rumble feed initialized: %s with 0 episodes (no entries in metadata)", feedModel.Title)
 		return nil
 	}
+
+	log.Infof("Processing %d Rumble entries into episodes", len(metadata.Entries))
 
 	// Parse yt-dlp entries into episodes
 	for i, entry := range metadata.Entries {
 		if i >= feedModel.PageSize {
+			log.Debugf("Reached page size limit (%d), stopping episode parsing", feedModel.PageSize)
 			break
 		}
+
+		log.Debugf("Processing entry %d: id=%s, title=%s, duration=%d", i, entry.Id, entry.Title, entry.Duration)
 
 		// Parse upload date (YYYYMMDD format from yt-dlp)
 		var pubDate time.Time

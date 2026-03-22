@@ -191,10 +191,11 @@ func (dl *YoutubeDl) Update(ctx context.Context) error {
 func (dl *YoutubeDl) PlaylistMetadata(ctx context.Context, url string) (metadata PlaylistMetadata, err error) {
 	log.Info("getting playlist metadata for: ", url)
 	args := []string{
-		"--playlist-items", "0",
-		"-J",            // JSON output
-		"-q",            // quiet mode
-		"--no-warnings", // suppress warnings
+		"--flat-playlist", // Get flat playlist format with entries
+		"-J",              // JSON output
+		"-q",              // quiet mode
+		"--no-warnings",   // suppress warnings
+		"--skip-download", // Don't download videos
 		url,
 	}
 	dl.updateLock.Lock()
@@ -212,8 +213,20 @@ func (dl *YoutubeDl) PlaylistMetadata(ctx context.Context, url string) (metadata
 		return PlaylistMetadata{}, errors.New(output)
 	}
 
+	// Debug logging: print first 2000 chars of raw JSON output
+	if len(output) > 2000 {
+		log.Debugf("yt-dlp raw JSON output (first 2000 chars): %s...", output[:2000])
+	} else {
+		log.Debugf("yt-dlp raw JSON output: %s", output)
+	}
+
 	var playlistMetadata PlaylistMetadata
-	json.Unmarshal([]byte(output), &playlistMetadata)
+	if err := json.Unmarshal([]byte(output), &playlistMetadata); err != nil {
+		log.WithError(err).Errorf("failed to unmarshal yt-dlp JSON output: %v", err)
+		return PlaylistMetadata{}, errors.Wrap(err, "failed to parse yt-dlp JSON")
+	}
+
+	log.Infof("Parsed metadata: %d entries found", len(playlistMetadata.Entries))
 	return playlistMetadata, nil
 }
 
