@@ -9,7 +9,7 @@
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/mxpv)](https://github.com/sponsors/mxpv)
 [![Patreon](https://img.shields.io/badge/support-patreon-E6461A.svg)](https://www.patreon.com/podsync)
 
-Podsync - is a simple, free service that lets you listen to any YouTube, Vimeo, or Odysee channels, playlists or user videos in
+Podsync - is a simple, free service that lets you listen to any YouTube, Vimeo, Odysee, or Rumble channels, playlists or user videos in
 podcast format.
 
 Podcast applications have a rich functionality for content delivery - automatic download of new episodes,
@@ -17,12 +17,12 @@ remembering last played position, sync between devices and offline listening. Th
 on YouTube and Vimeo. So the aim of Podsync is to make your life easier and enable you to view/listen to content on
 any device in podcast client.
 
-> **Note:** This fork adds support for **Odysee** platform downloads.
+> **Note:** This fork adds support for **Odysee** and **Rumble** platform downloads.
 > See [Configuration](#-configuration) below for details.
 
 ## ✨ Features
 
-- Works with YouTube, Vimeo, and Odysee.
+- Works with YouTube, Vimeo, Odysee, and Rumble.
 - Supports SoundCloud and Twitch.
 - Supports feeds configuration: video/audio, high/low quality, max video height, etc.
 - mp3 encoding
@@ -70,6 +70,7 @@ Some platforms require API tokens:
 - **YouTube**: [How to get YouTube API key](https://elfsight.com/blog/2016/12/how-to-get-youtube-api-key-tutorial/)
 - **Vimeo**: [Generate an access token for Vimeo](https://developer.vimeo.com/api/guides/start#generate-access-token)
 - **Odysee**: No API key required - public RSS feeds
+- **Rumble**: No API key required - public channels and videos
 - **SoundCloud**: No API key required - public feeds
 - **Twitch**: Requires Client ID and Client Secret
 
@@ -102,6 +103,13 @@ youtube = "PASTE YOUR API KEY HERE" # See config.toml.example for environment va
 
     [feeds.ID3]
     url = "https://odysee.com/@theduran:e"
+
+    # Rumble example (no API key required)
+    [feeds.ID4]
+    url = "https://rumble.com/c/TimPool"
+
+    [feeds.ID5]
+    url = "https://rumble.com/c/OfficialLouiseFarrakhan"
 ```
 
 If you want to hide Podsync behind reverse proxy like nginx, you can use `hostname` field:
@@ -130,6 +138,7 @@ Podsync supports the following environment variables for configuration and API k
 | `PODSYNC_SOUNDCLOUD_API_KEY` | SoundCloud API key(s), space-separated for rotation                                       | `soundcloud_key1 soundcloud_key2`             |
 | `PODSYNC_TWITCH_API_KEY`     | Twitch API credentials in the format `CLIENT_ID:CLIENT_SECRET`, space-separated for multi | `id1:secret1 id2:secret2`                     |
 | `PODSYNC_ODYSEE_API_KEY`     | Odysee API key (optional, not required for public feeds)                                  | `key1`                                        |
+| `PODSYNC_RUMBLE_API_KEY`     | Rumble API key (optional, not required for public channels)                              | `key1`                                        |
 
 ## 🚀 How to run
 
