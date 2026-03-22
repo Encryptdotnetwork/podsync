@@ -60,3 +60,14 @@ func (p *RotatedKeyProvider) Get() string {
 
 	return p.keys[current]
 }
+
+// NoOpKeyProvider is used for providers that don't require API keys (e.g., Odysee, SoundCloud)
+type NoOpKeyProvider struct{}
+
+func NewNoOpKeyProvider() KeyProvider {
+	return &NoOpKeyProvider{}
+}
+
+func (p *NoOpKeyProvider) Get() string {
+	return ""
+}
