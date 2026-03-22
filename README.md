@@ -9,7 +9,7 @@
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/mxpv)](https://github.com/sponsors/mxpv)
 [![Patreon](https://img.shields.io/badge/support-patreon-E6461A.svg)](https://www.patreon.com/podsync)
 
-Podsync - is a simple, free service that lets you listen to any YouTube / Vimeo channels, playlists or user videos in
+Podsync - is a simple, free service that lets you listen to any YouTube, Vimeo, or Odysee channels, playlists or user videos in
 podcast format.
 
 Podcast applications have a rich functionality for content delivery - automatic download of new episodes,
@@ -19,7 +19,8 @@ any device in podcast client.
 
 ## ✨ Features
 
-- Works with YouTube and Vimeo.
+- Works with YouTube, Vimeo, and Odysee.
+- Supports SoundCloud and Twitch.
 - Supports feeds configuration: video/audio, high/low quality, max video height, etc.
 - mp3 encoding
 - Update scheduler supports cron expressions
@@ -61,10 +62,13 @@ $ docker run -it --rm ghcr.io/mxpv/podsync:nightly
 
 ### 🔑 Access tokens
 
-In order to query YouTube or Vimeo API you have to obtain an API token first.
+Some platforms require API tokens:
 
-- [How to get YouTube API key](https://elfsight.com/blog/2016/12/how-to-get-youtube-api-key-tutorial/)
-- [Generate an access token for Vimeo](https://developer.vimeo.com/api/guides/start#generate-access-token)
+- **YouTube**: [How to get YouTube API key](https://elfsight.com/blog/2016/12/how-to-get-youtube-api-key-tutorial/)
+- **Vimeo**: [Generate an access token for Vimeo](https://developer.vimeo.com/api/guides/start#generate-access-token)
+- **Odysee**: No API key required - public RSS feeds
+- **SoundCloud**: No API key required - public feeds
+- **Twitch**: Requires Client ID and Client Secret
 
 ## ⚙️ Configuration
 
@@ -88,6 +92,13 @@ youtube = "PASTE YOUR API KEY HERE" # See config.toml.example for environment va
 [feeds]
     [feeds.ID1]
     url = "https://www.youtube.com/channel/UCxC5Ls6DwqV0e-CYcAKkExQ"
+
+    # Odysee example (no API key required)
+    [feeds.ID2]
+    url = "https://odysee.com/@lbry:3f"
+
+    [feeds.ID3]
+    url = "https://odysee.com/@theduran:e"
 ```
 
 If you want to hide Podsync behind reverse proxy like nginx, you can use `hostname` field:
@@ -115,6 +126,7 @@ Podsync supports the following environment variables for configuration and API k
 | `PODSYNC_VIMEO_API_KEY`      | Vimeo API key(s), space-separated for rotation                                            | `key1` or `key1 key2`        |
 | `PODSYNC_SOUNDCLOUD_API_KEY` | SoundCloud API key(s), space-separated for rotation                                       | `soundcloud_key1 soundcloud_key2`             |
 | `PODSYNC_TWITCH_API_KEY`     | Twitch API credentials in the format `CLIENT_ID:CLIENT_SECRET`, space-separated for multi | `id1:secret1 id2:secret2`                     |
+| `PODSYNC_ODYSEE_API_KEY`     | Odysee API key (optional, not required for public feeds)                                  | `key1`                                        |
 
 ## 🚀 How to run
 
