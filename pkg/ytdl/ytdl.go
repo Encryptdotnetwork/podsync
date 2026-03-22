@@ -33,6 +33,17 @@ type PlaylistMetadataThumbnail struct {
 	Height     int    `json:"height"`
 }
 
+type PlaylistEntry struct {
+	Id          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Duration    int    `json:"duration"`
+	UploadDate  string `json:"upload_date"`
+	Thumbnail   string `json:"thumbnail"`
+	Url         string `json:"url"`
+	WebpageUrl  string `json:"webpage_url"`
+}
+
 type PlaylistMetadata struct {
 	Id          string                      `json:"id"`
 	Title       string                      `json:"title"`
@@ -42,6 +53,7 @@ type PlaylistMetadata struct {
 	ChannelId   string                      `json:"channel_id"`
 	ChannelUrl  string                      `json:"channel_url"`
 	WebpageUrl  string                      `json:"webpage_url"`
+	Entries     []PlaylistEntry             `json:"entries"`
 }
 
 var (
