@@ -49,15 +49,17 @@ no_listing = false
   # e.g. https://example-bucket-name.s3.us-west-2.amazonaws.com/example/prefix/
   prefix = "example/prefix"
 
-# API keys to be used to access Youtube and Vimeo.
+# API keys to be used to access Youtube, Vimeo, and other services.
 # These can be either specified as string parameter or array of string (so those will be rotated).
 # Alternatively, you can set the following environment variables:
 #   PODSYNC_YOUTUBE_API_KEY for YouTube
 #   PODSYNC_VIMEO_API_KEY for Vimeo
 #   PODSYNC_SOUNDCLOUD_API_KEY for Soundcloud
 #   PODSYNC_TWITCH_API_KEY for Twitch (format: CLIENT_ID:CLIENT_SECRET)
+#   PODSYNC_ODYSEE_API_KEY for Odysee (optional, not required for public feeds)
 # Environment variables support multiple keys separated by spaces for API key rotation:
 #   export PODSYNC_YOUTUBE_API_KEY="key1 key2 key3"
+# Note: Odysee and SoundCloud do not require API keys for public content.
 [tokens]
 youtube = "YOUTUBE_API_TOKEN" # YouTube API Key. See https://developers.google.com/youtube/registering_an_application
 vimeo = [ # Multiple keys will be rotated.
@@ -162,6 +164,17 @@ vimeo = [ # Multiple keys will be rotated.
   ownerEmail = "mrs@smith.org"
   # optional: this will override the default link (usually the URL address) in the generated RSS feed with another link
   link = "https://example.org"
+
+  # Odysee feed example (no API key required - public feeds)
+  [feeds.odysee_example]
+  # Odysee channel URL format: https://odysee.com/@CHANNEL_NAME:CHANNEL_ID
+  # Channel ID is the part after the colon (e.g., 3f, e, etc.)
+  url = "https://odysee.com/@lbry:3f"
+  update_period = "12h"
+  quality = "high"
+  format = "video"
+  max_height = 720
+  opml = true
 
 # Podsync uses local database to store feeds and episodes metadata.
 # This section is optional and usually not needed to configure unless some very specific corner cases.

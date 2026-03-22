@@ -18,6 +18,7 @@ const (
 	ProviderSoundcloud = Provider("soundcloud")
 	ProviderTwitch     = Provider("twitch")
 	ProviderOdysee     = Provider("odysee")
+	ProviderRumble     = Provider("rumble")
 )
 
 // Info represents data extracted from URL
