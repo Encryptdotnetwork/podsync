@@ -57,9 +57,10 @@ no_listing = false
 #   PODSYNC_SOUNDCLOUD_API_KEY for Soundcloud
 #   PODSYNC_TWITCH_API_KEY for Twitch (format: CLIENT_ID:CLIENT_SECRET)
 #   PODSYNC_ODYSEE_API_KEY for Odysee (optional, not required for public feeds)
+#   PODSYNC_RUMBLE_API_KEY for Rumble (optional, not required for public channels)
 # Environment variables support multiple keys separated by spaces for API key rotation:
 #   export PODSYNC_YOUTUBE_API_KEY="key1 key2 key3"
-# Note: Odysee and SoundCloud do not require API keys for public content.
+# Note: Odysee, Rumble, and SoundCloud do not require API keys for public content.
 [tokens]
 youtube = "YOUTUBE_API_TOKEN" # YouTube API Key. See https://developers.google.com/youtube/registering_an_application
 vimeo = [ # Multiple keys will be rotated.
@@ -170,6 +171,16 @@ vimeo = [ # Multiple keys will be rotated.
   # Odysee channel URL format: https://odysee.com/@CHANNEL_NAME:CHANNEL_ID
   # Channel ID is the part after the colon (e.g., 3f, e, etc.)
   url = "https://odysee.com/@lbry:3f"
+  update_period = "12h"
+  quality = "high"
+  format = "video"
+  max_height = 720
+  opml = true
+
+  # Rumble feed example (no API key required - public channels)
+  [feeds.rumble_example]
+  # Rumble channel URL format: https://rumble.com/c/CHANNEL_NAME
+  url = "https://rumble.com/c/TimPool"
   update_period = "12h"
   quality = "high"
   format = "video"
