@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -126,40 +128,31 @@ func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, fe
 			break
 		}
 
-		// Debug logging: show first 3 entries in detail
-		if i < 3 {
-			log.Infof("Entry %d fields: id=%q, title=%q, desc=%q, duration=%d, url=%q, webpage_url=%q, upload_date=%q",
-				i, entry.Id, entry.Title, entry.Description, entry.Duration, entry.Url, entry.WebpageUrl, entry.UploadDate)
-		}
+		// For Rumble flat-playlist, we need to extract ID and title from the URL
+		// URL format: https://rumble.com/vXXXXXX-title-slug.html?query=params
 
-		// Handle missing title - use ID or URL as fallback
-		title := entry.Title
-		if title == "" {
-			if entry.WebpageUrl != "" {
-				// Extract video ID from URL if title is empty
-				title = extractVideoIdFromRumbleUrl(entry.WebpageUrl)
-			}
-			if title == "" {
-				title = entry.Id
-			}
-			log.Warnf("Entry %d missing title, using fallback: %q", i, title)
-		}
+		// Extract video ID and title from URL
+		episodeId, episodeTitle := extractRumbleIdAndTitle(entry.Url)
 
-		// Handle missing description
-		description := entry.Description
-		if description == "" {
-			description = "No description available"
-			log.Warnf("Entry %d missing description", i)
-		}
-
-		// Handle missing ID
-		episodeId := entry.Id
 		if episodeId == "" {
-			episodeId = extractVideoIdFromRumbleUrl(entry.WebpageUrl)
-			log.Warnf("Entry %d missing id, extracted from URL: %q", i, episodeId)
+			log.Warnf("Entry %d: unable to extract ID from URL %s", i, entry.Url)
+			continue
 		}
 
-		log.Debugf("Processing entry %d: id=%s, title=%s, duration=%d", i, episodeId, title, entry.Duration)
+		if episodeTitle == "" {
+			episodeTitle = episodeId
+			log.Warnf("Entry %d: unable to extract title from URL, using ID as title", i)
+		}
+
+		// Use title as description since flat-playlist has no description
+		description := episodeTitle
+
+		// Debug logging: first 3 entries
+		if i < 3 {
+			log.Infof("Entry %d extracted: id=%q, title=%q, url=%q", i, episodeId, episodeTitle, entry.Url)
+		}
+
+		log.Debugf("Processing entry %d: id=%s, title=%s", i, episodeId, episodeTitle)
 
 		// Parse upload date (YYYYMMDD format from yt-dlp)
 		var pubDate time.Time
@@ -176,15 +169,15 @@ func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, fe
 		// Duration in seconds
 		duration := int64(entry.Duration)
 
-		// Build video URL if not provided
+		// Build video URL - use entry URL directly
 		videoURL := entry.Url
 		if videoURL == "" {
-			videoURL = entry.WebpageUrl
+			videoURL = fmt.Sprintf("https://rumble.com/%s", episodeId)
 		}
 
 		episode := &model.Episode{
 			ID:          episodeId,
-			Title:       title,
+			Title:       episodeTitle,
 			Description: description,
 			Thumbnail:   entry.Thumbnail,
 			Duration:    duration,
@@ -201,35 +194,81 @@ func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, fe
 	return nil
 }
 
-// extractVideoIdFromRumbleUrl extracts the video ID from a Rumble URL
-// Examples:
-// https://rumble.com/vXXXXXX-video-title.html -> vXXXXXX
-// https://rumble.com/v/vXXXXXX -> vXXXXXX
-func extractVideoIdFromRumbleUrl(url string) string {
-	if url == "" {
+// extractRumbleIdAndTitle extracts video ID and title from a Rumble URL
+// URL format: https://rumble.com/vXXXXXX-title-slug.html?query=params
+// Returns: (videoId, title)
+// Example: ("v778v9a", "The Lodge Card Club Raid Is A Witch Hunt...")
+func extractRumbleIdAndTitle(rumbleUrl string) (string, string) {
+	if rumbleUrl == "" {
+		return "", ""
+	}
+
+	// Parse the URL to get the path
+	parsedUrl, err := url.Parse(rumbleUrl)
+	if err != nil {
+		log.Debugf("Failed to parse URL: %s, error: %v", rumbleUrl, err)
+		return "", ""
+	}
+
+	// Get the URL path and remove leading /
+	urlPath := strings.TrimPrefix(parsedUrl.Path, "/")
+
+	// Get just the filename (without extension and query params)
+	filename := path.Base(urlPath)
+	filename = strings.TrimSuffix(filename, ".html")
+
+	// URL format: vXXXXXX-title-slug
+	// Split on first dash to separate ID from title
+	parts := strings.SplitN(filename, "-", 2)
+	if len(parts) < 1 {
+		return "", ""
+	}
+
+	videoId := parts[0]
+
+	// Validate that we have a video ID starting with 'v'
+	if !strings.HasPrefix(videoId, "v") || len(videoId) < 2 {
+		return "", ""
+	}
+
+	// Extract and clean title from slug
+	var title string
+	if len(parts) > 1 {
+		title = cleanTitleFromSlug(parts[1])
+	}
+
+	return videoId, title
+}
+
+// cleanTitleFromSlug converts URL slug to a proper title
+// "the-lodge-card-club-raid-is-a-witch-hunt" -> "The Lodge Card Club Raid Is A Witch Hunt"
+func cleanTitleFromSlug(slug string) string {
+	if slug == "" {
 		return ""
 	}
 
-	// Parse the path
-	parts := strings.Split(url, "/")
-	if len(parts) < 2 {
-		return ""
-	}
+	// Replace hyphens with spaces
+	title := strings.ReplaceAll(slug, "-", " ")
 
-	// Get the last part of the path
-	lastPart := parts[len(parts)-1]
+	// Title case each word
+	title = strings.Title(title) // nolint:staticcheck
 
-	// Remove .html extension if present
-	lastPart = strings.TrimSuffix(lastPart, ".html")
-
-	// Extract video ID (format: vXXXXXX or vXXXXXX-title)
-	if strings.HasPrefix(lastPart, "v") {
-		// If it contains a dash, take everything before the dash
-		if dashIdx := strings.Index(lastPart, "-"); dashIdx > 0 {
-			return lastPart[:dashIdx]
+	// Limit length to avoid excessively long titles
+	if len(title) > 200 {
+		title = title[:200]
+		// Remove trailing partial word
+		lastSpace := strings.LastIndex(title, " ")
+		if lastSpace > 0 && lastSpace > 150 {
+			title = title[:lastSpace] + "..."
 		}
-		return lastPart
 	}
 
-	return ""
+	return title
+}
+
+// extractVideoIdFromRumbleUrl is a helper that extracts just the video ID
+// Kept for backward compatibility
+func extractVideoIdFromRumbleUrl(rumbleUrl string) string {
+	id, _ := extractRumbleIdAndTitle(rumbleUrl)
+	return id
 }
