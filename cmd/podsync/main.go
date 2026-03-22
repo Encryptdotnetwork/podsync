@@ -181,6 +181,9 @@ func main() {
 	if _, ok := keys[model.ProviderSoundcloud]; !ok {
 		keys[model.ProviderSoundcloud] = feed.NewNoOpKeyProvider()
 	}
+	if _, ok := keys[model.ProviderRumble]; !ok {
+		keys[model.ProviderRumble] = feed.NewNoOpKeyProvider()
+	}
 
 	log.Debug("creating update manager")
 	manager, err := update.NewUpdater(cfg.Feeds, keys, cfg.Server.Hostname, downloader, database, storage)
