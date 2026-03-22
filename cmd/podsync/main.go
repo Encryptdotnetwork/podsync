@@ -174,6 +174,14 @@ func main() {
 		keys[name] = provider
 	}
 
+	// Register providers that don't require API keys
+	if _, ok := keys[model.ProviderOdysee]; !ok {
+		keys[model.ProviderOdysee] = feed.NewNoOpKeyProvider()
+	}
+	if _, ok := keys[model.ProviderSoundcloud]; !ok {
+		keys[model.ProviderSoundcloud] = feed.NewNoOpKeyProvider()
+	}
+
 	log.Debug("creating update manager")
 	manager, err := update.NewUpdater(cfg.Feeds, keys, cfg.Server.Hostname, downloader, database, storage)
 	if err != nil {
