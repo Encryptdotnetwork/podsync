@@ -126,7 +126,40 @@ func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, fe
 			break
 		}
 
-		log.Debugf("Processing entry %d: id=%s, title=%s, duration=%d", i, entry.Id, entry.Title, entry.Duration)
+		// Debug logging: show first 3 entries in detail
+		if i < 3 {
+			log.Infof("Entry %d fields: id=%q, title=%q, desc=%q, duration=%d, url=%q, webpage_url=%q, upload_date=%q",
+				i, entry.Id, entry.Title, entry.Description, entry.Duration, entry.Url, entry.WebpageUrl, entry.UploadDate)
+		}
+
+		// Handle missing title - use ID or URL as fallback
+		title := entry.Title
+		if title == "" {
+			if entry.WebpageUrl != "" {
+				// Extract video ID from URL if title is empty
+				title = extractVideoIdFromRumbleUrl(entry.WebpageUrl)
+			}
+			if title == "" {
+				title = entry.Id
+			}
+			log.Warnf("Entry %d missing title, using fallback: %q", i, title)
+		}
+
+		// Handle missing description
+		description := entry.Description
+		if description == "" {
+			description = "No description available"
+			log.Warnf("Entry %d missing description", i)
+		}
+
+		// Handle missing ID
+		episodeId := entry.Id
+		if episodeId == "" {
+			episodeId = extractVideoIdFromRumbleUrl(entry.WebpageUrl)
+			log.Warnf("Entry %d missing id, extracted from URL: %q", i, episodeId)
+		}
+
+		log.Debugf("Processing entry %d: id=%s, title=%s, duration=%d", i, episodeId, title, entry.Duration)
 
 		// Parse upload date (YYYYMMDD format from yt-dlp)
 		var pubDate time.Time
@@ -150,9 +183,9 @@ func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, fe
 		}
 
 		episode := &model.Episode{
-			ID:          entry.Id,
-			Title:       entry.Title,
-			Description: entry.Description,
+			ID:          episodeId,
+			Title:       title,
+			Description: description,
 			Thumbnail:   entry.Thumbnail,
 			Duration:    duration,
 			VideoURL:    videoURL,
@@ -166,4 +199,37 @@ func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, fe
 
 	log.Infof("Rumble feed initialized: %s with %d initial episodes", feedModel.Title, len(feedModel.Episodes))
 	return nil
+}
+
+// extractVideoIdFromRumbleUrl extracts the video ID from a Rumble URL
+// Examples:
+// https://rumble.com/vXXXXXX-video-title.html -> vXXXXXX
+// https://rumble.com/v/vXXXXXX -> vXXXXXX
+func extractVideoIdFromRumbleUrl(url string) string {
+	if url == "" {
+		return ""
+	}
+
+	// Parse the path
+	parts := strings.Split(url, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+
+	// Get the last part of the path
+	lastPart := parts[len(parts)-1]
+
+	// Remove .html extension if present
+	lastPart = strings.TrimSuffix(lastPart, ".html")
+
+	// Extract video ID (format: vXXXXXX or vXXXXXX-title)
+	if strings.HasPrefix(lastPart, "v") {
+		// If it contains a dash, take everything before the dash
+		if dashIdx := strings.Index(lastPart, "-"); dashIdx > 0 {
+			return lastPart[:dashIdx]
+		}
+		return lastPart
+	}
+
+	return ""
 }
