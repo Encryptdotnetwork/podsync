@@ -110,12 +110,53 @@ func (rb *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fe
 }
 
 func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, feedModel *model.Feed, metadata ytdl.PlaylistMetadata) error {
-	// yt-dlp's PlaylistMetadata structure doesn't include entries by default
-	// In a normal use case, we would need to call a different yt-dlp command to get the flat playlist
-	// For now, we'll use the metadata service to build entries if provided
-	// This is a simplified version - a full implementation might need additional yt-dlp calls
+	if len(metadata.Entries) == 0 {
+		log.Infof("Rumble feed initialized: %s with 0 episodes", feedModel.Title)
+		return nil
+	}
+
+	// Parse yt-dlp entries into episodes
+	for i, entry := range metadata.Entries {
+		if i >= feedModel.PageSize {
+			break
+		}
+
+		// Parse upload date (YYYYMMDD format from yt-dlp)
+		var pubDate time.Time
+		if entry.UploadDate != "" {
+			if t, err := time.Parse("20060102", entry.UploadDate); err == nil {
+				pubDate = t
+			} else {
+				pubDate = time.Now().UTC()
+			}
+		} else {
+			pubDate = time.Now().UTC()
+		}
+
+		// Duration in seconds
+		duration := int64(entry.Duration)
+
+		// Build video URL if not provided
+		videoURL := entry.Url
+		if videoURL == "" {
+			videoURL = entry.WebpageUrl
+		}
+
+		episode := &model.Episode{
+			ID:          entry.Id,
+			Title:       entry.Title,
+			Description: entry.Description,
+			Thumbnail:   entry.Thumbnail,
+			Duration:    duration,
+			VideoURL:    videoURL,
+			PubDate:     pubDate,
+			Order:       fmt.Sprintf("%d", i),
+			Status:      model.EpisodeNew,
+		}
+
+		feedModel.Episodes = append(feedModel.Episodes, episode)
+	}
 
 	log.Infof("Rumble feed initialized: %s with %d initial episodes", feedModel.Title, len(feedModel.Episodes))
-
 	return nil
 }
