@@ -17,6 +17,9 @@ remembering last played position, sync between devices and offline listening. Th
 on YouTube and Vimeo. So the aim of Podsync is to make your life easier and enable you to view/listen to content on
 any device in podcast client.
 
+> **Note:** This fork adds support for **Odysee** platform downloads.
+> See [Configuration](#-configuration) below for details.
+
 ## ✨ Features
 
 - Works with YouTube, Vimeo, and Odysee.
