@@ -72,26 +72,39 @@ func (rb *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fe
 		_feed.PageSize = 50
 	}
 
-	// Get playlist metadata using yt-dlp
+	// Get channel metadata without flat-playlist (for title, description, etc.)
+	channelTitle, channelDesc, channelAuthor := rb.fetchChannelMetadata(ctx, rumbleURL)
+
+	// Get playlist entries using flat-playlist
 	metadata, err := rb.downloader.PlaylistMetadata(ctx, rumbleURL)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to fetch Rumble playlist metadata from %s", rumbleURL)
 	}
 
-	log.Infof("Rumble metadata retrieved: title=%s, entries=%d, channel=%s", metadata.Title, len(metadata.Entries), metadata.Channel)
+	log.Infof("Rumble channel metadata: title=%q, entries=%d", channelTitle, len(metadata.Entries))
 
-	// Set feed metadata from yt-dlp output
-	_feed.Title = metadata.Title
+	// Set feed title from channel metadata, fallback to channel variable
+	_feed.Title = channelTitle
 	if _feed.Title == "" {
 		_feed.Title = metadata.Channel
 	}
-
-	_feed.Description = metadata.Description
-	if _feed.Description == "" {
-		_feed.Description = fmt.Sprintf("Rumble channel: %s", metadata.Channel)
+	if _feed.Title == "" {
+		_feed.Title = "Rumble Channel"
 	}
 
-	_feed.Author = metadata.Channel
+	// Set feed description from channel metadata
+	_feed.Description = channelDesc
+	if _feed.Description == "" {
+		_feed.Description = fmt.Sprintf("Rumble channel: %s", _feed.Title)
+	}
+
+	// Set author
+	_feed.Author = channelAuthor
+	if _feed.Author == "" {
+		_feed.Author = metadata.Channel
+	}
+
+	// Set URL
 	_feed.ItemURL = metadata.ChannelUrl
 	if _feed.ItemURL == "" {
 		_feed.ItemURL = rumbleURL
@@ -271,4 +284,24 @@ func cleanTitleFromSlug(slug string) string {
 func extractVideoIdFromRumbleUrl(rumbleUrl string) string {
 	id, _ := extractRumbleIdAndTitle(rumbleUrl)
 	return id
+}
+
+// fetchChannelMetadata makes a separate yt-dlp call without --flat-playlist
+// to extract channel title, description, and author information
+func (rb *RumbleBuilder) fetchChannelMetadata(ctx context.Context, rumbleURL string) (title, description, author string) {
+	metadata, err := rb.downloader.ChannelMetadata(ctx, rumbleURL)
+	if err != nil {
+		log.Warnf("failed to fetch Rumble channel metadata: %v", err)
+		return
+	}
+
+	title = metadata.Title
+	if title == "" {
+		title = metadata.Channel
+	}
+	description = metadata.Description
+	author = metadata.Channel
+
+	log.Debugf("Rumble channel info: title=%q, description=%q, author=%q", title, description, author)
+	return
 }
