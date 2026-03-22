@@ -234,6 +234,43 @@ func (dl *YoutubeDl) PlaylistMetadata(ctx context.Context, url string) (metadata
 	return playlistMetadata, nil
 }
 
+// ChannelMetadata fetches channel-only metadata without entries (no --flat-playlist)
+// Used to get channel title, description, and other channel-level information
+func (dl *YoutubeDl) ChannelMetadata(ctx context.Context, url string) (metadata PlaylistMetadata, err error) {
+	log.Info("getting channel metadata for: ", url)
+	args := []string{
+		"-J",              // JSON output
+		"-q",              // quiet mode
+		"--no-warnings",   // suppress warnings
+		"--skip-download", // Don't download videos
+		url,
+	}
+	dl.updateLock.Lock()
+	defer dl.updateLock.Unlock()
+	output, err := dl.exec(ctx, args...)
+	if err != nil {
+		log.WithError(err).Errorf("youtube-dl error fetching channel metadata: %s", url)
+
+		// YouTube might block host with HTTP Error 429: Too Many Requests
+		if strings.Contains(output, "HTTP Error 429") {
+			return PlaylistMetadata{}, ErrTooManyRequests
+		}
+
+		log.Error(output)
+		return PlaylistMetadata{}, errors.New(output)
+	}
+
+	var channelMetadata PlaylistMetadata
+	if err := json.Unmarshal([]byte(output), &channelMetadata); err != nil {
+		log.WithError(err).Debugf("failed to unmarshal channel metadata JSON, may not be a channel: %v", err)
+		return PlaylistMetadata{}, errors.Wrap(err, "failed to parse channel metadata JSON")
+	}
+
+	log.Debugf("Channel metadata retrieved: title=%q, channel=%q, description=%q",
+		channelMetadata.Title, channelMetadata.Channel, channelMetadata.Description)
+	return channelMetadata, nil
+}
+
 func (dl *YoutubeDl) Download(ctx context.Context, feedConfig *feed.Config, episode *model.Episode) (r io.ReadCloser, err error) {
 	tmpDir, err := os.MkdirTemp("", "podsync-")
 	if err != nil {

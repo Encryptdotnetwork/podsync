@@ -22,6 +22,7 @@ import (
 
 type Downloader interface {
 	PlaylistMetadata(ctx context.Context, url string) (metadata ytdl.PlaylistMetadata, err error)
+	ChannelMetadata(ctx context.Context, url string) (metadata ytdl.PlaylistMetadata, err error)
 }
 
 const (
