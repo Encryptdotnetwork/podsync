@@ -1,12 +1,12 @@
 package builder
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -223,7 +223,7 @@ func TestOdyseeBuilderBuild(t *testing.T) {
 	// For now, we just verify the RSS parsing works
 	t.Run("parse RSS feed", func(t *testing.T) {
 		rssURL := server.URL + "/$/rss/@testchannel:1"
-		rssFeed, err := builder.fetchRSSFeed(nil, rssURL)
+		rssFeed, err := builder.fetchRSSFeed(context.Background(), rssURL)
 		require.NoError(t, err)
 		assert.Equal(t, "Test Channel", rssFeed.Channel.Title)
 		assert.Len(t, rssFeed.Channel.Items, 2)

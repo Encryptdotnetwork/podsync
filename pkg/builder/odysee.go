@@ -190,14 +190,8 @@ func parseRSSDuration(durationStr string) int64 {
 		return 0
 	}
 
-	// Try parsing as seconds
-	var seconds int64
-	fmt.Sscanf(strings.TrimSpace(durationStr), "%d", &seconds)
-	if seconds > 0 {
-		return seconds
-	}
-
-	// Try parsing HH:MM:SS format
+	// Try parsing HH:MM:SS format first (must come before integer parse to avoid
+	// fmt.Sscanf stopping at the colon and returning the leading number only)
 	parts := strings.Split(durationStr, ":")
 	if len(parts) == 3 {
 		var h, m, s int64
@@ -207,7 +201,10 @@ func parseRSSDuration(durationStr string) int64 {
 		return h*3600 + m*60 + s
 	}
 
-	return 0
+	// Try parsing as plain seconds
+	var seconds int64
+	fmt.Sscanf(strings.TrimSpace(durationStr), "%d", &seconds)
+	return seconds
 }
 
 func extractOdyseeVideoURL(link string) string {
