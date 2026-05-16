@@ -3,9 +3,11 @@ package builder
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,18 +41,19 @@ func (rb *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fe
 		return nil, errors.New("invalid URL provider for Rumble builder")
 	}
 
-	// Construct Rumble URL for yt-dlp
+	// User playlists: yt-dlp has no extractor for /playlists/ URLs, so we
+	// fetch the page ourselves and hand individual video URLs back to yt-dlp.
+	if info.LinkType == model.TypePlaylist && strings.HasPrefix(info.ItemID, "playlists/") {
+		return rb.buildFromPlaylist(ctx, cfg, info)
+	}
+
+	// Construct Rumble URL for yt-dlp (channels and individual videos)
 	var rumbleURL string
 	switch info.LinkType {
 	case model.TypeChannel:
-		// Handle both channel name and c-ID formats
-		if strings.HasPrefix(info.ItemID, "c-") {
-			rumbleURL = fmt.Sprintf("https://rumble.com/c/%s", info.ItemID)
-		} else {
-			rumbleURL = fmt.Sprintf("https://rumble.com/c/%s", info.ItemID)
-		}
+		rumbleURL = fmt.Sprintf("https://rumble.com/c/%s", info.ItemID)
 	case model.TypePlaylist:
-		// Individual video (/vXXXXXX) or user playlist (/playlists/{id})
+		// Individual video (/vXXXXXX)
 		rumbleURL = fmt.Sprintf("https://rumble.com/%s", info.ItemID)
 	default:
 		return nil, errors.New("unsupported Rumble link type")
@@ -284,6 +287,134 @@ func cleanTitleFromSlug(slug string) string {
 func extractVideoIdFromRumbleUrl(rumbleUrl string) string {
 	id, _ := extractRumbleIdAndTitle(rumbleUrl)
 	return id
+}
+
+// rumbleOGTagRegex matches Open Graph meta tags in either attribute order.
+var rumbleOGTagRegex = regexp.MustCompile(`<meta[^>]+property="og:([^"]+)"[^>]+content="([^"]*)"`)
+var rumbleOGTagRegex2 = regexp.MustCompile(`<meta[^>]+content="([^"]*)"[^>]+property="og:([^"]+)"`)
+
+// rumbleVideoPathRegex matches Rumble video href paths: /vXXXXXX-slug.html
+var rumbleVideoPathRegex = regexp.MustCompile(`href="(/v[a-zA-Z0-9]+-[^"]+\.html)"`)
+
+func parseRumbleOGTag(body []byte, name string) string {
+	for _, m := range rumbleOGTagRegex.FindAllSubmatch(body, -1) {
+		if string(m[1]) == name {
+			return string(m[2])
+		}
+	}
+	for _, m := range rumbleOGTagRegex2.FindAllSubmatch(body, -1) {
+		if string(m[2]) == name {
+			return string(m[1])
+		}
+	}
+	return ""
+}
+
+func extractRumbleVideoURLsFromHTML(body []byte) []string {
+	matches := rumbleVideoPathRegex.FindAllSubmatch(body, -1)
+	seen := make(map[string]bool)
+	var urls []string
+	for _, match := range matches {
+		p := string(match[1])
+		if !seen[p] {
+			seen[p] = true
+			urls = append(urls, "https://rumble.com"+p)
+		}
+	}
+	return urls
+}
+
+// buildFromPlaylist fetches a Rumble user playlist page directly (yt-dlp has no
+// extractor for /playlists/ URLs) and populates the feed from the HTML.
+// Individual video URLs are stored as VideoURL so yt-dlp can download them normally.
+func (rb *RumbleBuilder) buildFromPlaylist(ctx context.Context, cfg *feed.Config, info model.Info) (*model.Feed, error) {
+	playlistID := strings.TrimPrefix(info.ItemID, "playlists/")
+	playlistURL := "https://rumble.com/playlists/" + playlistID
+
+	req, err := http.NewRequestWithContext(ctx, "GET", playlistURL, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create playlist request")
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Podsync/2.0)")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	resp, err := rb.client.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to fetch playlist page")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.Errorf("playlist page returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read playlist page")
+	}
+
+	title := parseRumbleOGTag(body, "title")
+	title = strings.TrimSuffix(title, " - Rumble")
+	if title == "" {
+		title = "Rumble Playlist"
+	}
+
+	description := parseRumbleOGTag(body, "description")
+	if description == "" {
+		description = fmt.Sprintf("Rumble playlist: %s", title)
+	}
+
+	coverArt := parseRumbleOGTag(body, "image")
+
+	pageSize := cfg.PageSize
+	if pageSize == 0 {
+		pageSize = 50
+	}
+
+	_feed := &model.Feed{
+		ItemID:          info.ItemID,
+		Provider:        info.Provider,
+		LinkType:        info.LinkType,
+		Format:          cfg.Format,
+		Quality:         cfg.Quality,
+		CoverArtQuality: cfg.Custom.CoverArtQuality,
+		PageSize:        pageSize,
+		PrivateFeed:     cfg.PrivateFeed,
+		UpdatedAt:       time.Now().UTC(),
+		Title:           title,
+		Description:     description,
+		CoverArt:        coverArt,
+		ItemURL:         playlistURL,
+	}
+
+	videoURLs := extractRumbleVideoURLsFromHTML(body)
+	log.Infof("Rumble playlist %q: found %d video(s)", title, len(videoURLs))
+
+	for i, videoURL := range videoURLs {
+		if i >= pageSize {
+			break
+		}
+		episodeID, episodeTitle := extractRumbleIdAndTitle(videoURL)
+		if episodeID == "" {
+			log.Warnf("Rumble playlist entry %d: cannot extract ID from %s", i, videoURL)
+			continue
+		}
+		if episodeTitle == "" {
+			episodeTitle = episodeID
+		}
+		_feed.Episodes = append(_feed.Episodes, &model.Episode{
+			ID:          episodeID,
+			Title:       episodeTitle,
+			Description: episodeTitle,
+			VideoURL:    videoURL,
+			PubDate:     time.Now().UTC(),
+			Order:       fmt.Sprintf("%d", i),
+			Status:      model.EpisodeNew,
+		})
+	}
+
+	log.Infof("Rumble playlist feed %q initialised with %d episode(s)", title, len(_feed.Episodes))
+	return _feed, nil
 }
 
 // fetchChannelMetadata makes a separate yt-dlp call without --flat-playlist
