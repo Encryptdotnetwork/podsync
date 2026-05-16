@@ -149,3 +149,36 @@ func TestParseVimeoURL_InvalidLink(t *testing.T) {
 	_, _, err = parseVimeoURL(link)
 	require.Error(t, err)
 }
+
+func TestParseRumbleURL_Channel(t *testing.T) {
+	link, _ := url.ParseRequestURI("https://rumble.com/c/RTNews")
+	kind, id, err := parseRumbleURL(link)
+	require.NoError(t, err)
+	require.Equal(t, model.TypeChannel, kind)
+	require.Equal(t, "RTNews", id)
+}
+
+func TestParseRumbleURL_Playlist(t *testing.T) {
+	link, _ := url.ParseRequestURI("https://rumble.com/playlists/b5CO7OKzuUM")
+	kind, id, err := parseRumbleURL(link)
+	require.NoError(t, err)
+	require.Equal(t, model.TypePlaylist, kind)
+	require.Equal(t, "playlists/b5CO7OKzuUM", id)
+
+	// URL with query params (as seen in browser)
+	link, _ = url.ParseRequestURI("https://rumble.com/playlists/b5CO7OKzuUM?e9s=src_v1_upp_pl")
+	kind, id, err = parseRumbleURL(link)
+	require.NoError(t, err)
+	require.Equal(t, model.TypePlaylist, kind)
+	require.Equal(t, "playlists/b5CO7OKzuUM", id)
+}
+
+func TestParseRumbleURL_InvalidLink(t *testing.T) {
+	link, _ := url.ParseRequestURI("https://rumble.com")
+	_, _, err := parseRumbleURL(link)
+	require.Error(t, err)
+
+	link, _ = url.ParseRequestURI("https://rumble.com/unknown/path")
+	_, _, err = parseRumbleURL(link)
+	require.Error(t, err)
+}

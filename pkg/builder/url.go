@@ -297,6 +297,7 @@ func parseOdyseeURL(parsed *url.URL) (model.Type, string, error) {
 func parseRumbleURL(parsed *url.URL) (model.Type, string, error) {
 	// - https://rumble.com/c/creator-name
 	// - https://rumble.com/c/c-123456
+	// - https://rumble.com/playlists/{id}
 	// - https://rumble.com/vXXXXXX-video-title.html
 	path := parsed.EscapedPath()
 	parts := strings.Split(path, "/")
@@ -307,22 +308,18 @@ func parseRumbleURL(parsed *url.URL) (model.Type, string, error) {
 
 	// Channel format: /c/... or /c/c-NUMBER
 	if parts[1] == "c" && len(parts) > 2 && parts[2] != "" {
-		channelName := parts[2]
+		return model.TypeChannel, parts[2], nil
+	}
 
-		// Convert channel name to channel ID if needed
-		// yt-dlp handles both formats, but we'll use the channel identifier as-is
-		kind := model.TypeChannel
-		return kind, channelName, nil
+	// User playlist format: /playlists/{id}
+	if parts[1] == "playlists" && len(parts) > 2 && parts[2] != "" {
+		return model.TypePlaylist, "playlists/" + parts[2], nil
 	}
 
 	// Individual video format: /vXXXXXX or /vXXXXXX-title.html
 	if strings.HasPrefix(parts[1], "v") && len(parts[1]) > 1 {
-		videoID := parts[1]
-		// Remove .html extension if present
-		videoID = strings.TrimSuffix(videoID, ".html")
-
-		kind := model.TypePlaylist
-		return kind, videoID, nil
+		videoID := strings.TrimSuffix(parts[1], ".html")
+		return model.TypePlaylist, videoID, nil
 	}
 
 	return "", "", errors.New("unsupported rumble link format")

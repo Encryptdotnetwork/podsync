@@ -50,7 +50,7 @@ func (rb *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fe
 			rumbleURL = fmt.Sprintf("https://rumble.com/c/%s", info.ItemID)
 		}
 	case model.TypePlaylist:
-		// Single video
+		// Individual video (/vXXXXXX) or user playlist (/playlists/{id})
 		rumbleURL = fmt.Sprintf("https://rumble.com/%s", info.ItemID)
 	default:
 		return nil, errors.New("unsupported Rumble link type")
