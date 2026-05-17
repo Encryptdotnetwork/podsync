@@ -293,8 +293,10 @@ func extractVideoIdFromRumbleUrl(rumbleUrl string) string {
 var rumbleOGTagRegex = regexp.MustCompile(`<meta[^>]+property="og:([^"]+)"[^>]+content="([^"]*)"`)
 var rumbleOGTagRegex2 = regexp.MustCompile(`<meta[^>]+content="([^"]*)"[^>]+property="og:([^"]+)"`)
 
-// rumbleVideoHrefRegex matches Rumble video href paths in single or double quotes.
-var rumbleVideoHrefRegex = regexp.MustCompile(`href=["'](/v[a-zA-Z0-9]+-[^"']+\.html)["']`)
+// rumbleVideoHrefRegex matches Rumble video href paths.
+// The href may have a query string after .html (e.g. ?playlist_id=...) so we
+// stop matching at the first ? or quote character.
+var rumbleVideoHrefRegex = regexp.MustCompile(`href=["'](/v[a-zA-Z0-9]+-[^"'?]+\.html)`)
 
 // rumbleVideoIDRegex extracts internal numeric video IDs from data-video-id attributes.
 var rumbleVideoIDRegex = regexp.MustCompile(`data-video-id="(\d+)"`)
