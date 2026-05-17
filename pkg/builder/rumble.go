@@ -293,8 +293,11 @@ func extractVideoIdFromRumbleUrl(rumbleUrl string) string {
 var rumbleOGTagRegex = regexp.MustCompile(`<meta[^>]+property="og:([^"]+)"[^>]+content="([^"]*)"`)
 var rumbleOGTagRegex2 = regexp.MustCompile(`<meta[^>]+content="([^"]*)"[^>]+property="og:([^"]+)"`)
 
-// rumbleVideoPathRegex matches Rumble video href paths: /vXXXXXX-slug.html
-var rumbleVideoPathRegex = regexp.MustCompile(`href="(/v[a-zA-Z0-9]+-[^"]+\.html)"`)
+// rumbleVideoHrefRegex matches Rumble video href paths in single or double quotes.
+var rumbleVideoHrefRegex = regexp.MustCompile(`href=["'](/v[a-zA-Z0-9]+-[^"']+\.html)["']`)
+
+// rumbleVideoIDRegex extracts internal numeric video IDs from data-video-id attributes.
+var rumbleVideoIDRegex = regexp.MustCompile(`data-video-id="(\d+)"`)
 
 // rumbleHTMLTitleRegex matches the <title> tag as a fallback for playlist name.
 var rumbleHTMLTitleRegex = regexp.MustCompile(`<title>([^<]+)</title>`)
@@ -314,16 +317,34 @@ func parseRumbleOGTag(body []byte, name string) string {
 }
 
 func extractRumbleVideoURLsFromHTML(body []byte) []string {
-	matches := rumbleVideoPathRegex.FindAllSubmatch(body, -1)
 	seen := make(map[string]bool)
 	var urls []string
-	for _, match := range matches {
-		p := string(match[1])
+
+	// Primary: look for href="/vXXXXXX-slug.html" (single or double quoted)
+	for _, m := range rumbleVideoHrefRegex.FindAllSubmatch(body, -1) {
+		p := string(m[1])
 		if !seen[p] {
 			seen[p] = true
 			urls = append(urls, "https://rumble.com"+p)
 		}
 	}
+
+	// Fallback: extract data-video-id numeric IDs and use embed URL format
+	// yt-dlp handles https://rumble.com/embed/v{id}/ for Rumble videos
+	if len(urls) == 0 {
+		for _, m := range rumbleVideoIDRegex.FindAllSubmatch(body, -1) {
+			id := string(m[1])
+			embedURL := "https://rumble.com/embed/v" + id + "/"
+			if !seen[embedURL] {
+				seen[embedURL] = true
+				urls = append(urls, embedURL)
+			}
+		}
+		if len(urls) > 0 {
+			log.Debugf("Rumble playlist: using embed URL fallback for %d video(s)", len(urls))
+		}
+	}
+
 	return urls
 }
 
@@ -463,7 +484,7 @@ func (rb *RumbleBuilder) fetchPlaylistVideoURLs(ctx context.Context, playlistID,
 		return nil, errors.Wrap(err, "failed to read playlist API response")
 	}
 
-	log.Debugf("Rumble playlist API response (%d bytes): %.200s", len(body), string(body))
+	log.Debugf("Rumble playlist API response (%d bytes): %.2000s", len(body), string(body))
 
 	return extractRumbleVideoURLsFromHTML(body), nil
 }
