@@ -296,6 +296,9 @@ var rumbleOGTagRegex2 = regexp.MustCompile(`<meta[^>]+content="([^"]*)"[^>]+prop
 // rumbleVideoPathRegex matches Rumble video href paths: /vXXXXXX-slug.html
 var rumbleVideoPathRegex = regexp.MustCompile(`href="(/v[a-zA-Z0-9]+-[^"]+\.html)"`)
 
+// rumbleHTMLTitleRegex matches the <title> tag as a fallback for playlist name.
+var rumbleHTMLTitleRegex = regexp.MustCompile(`<title>([^<]+)</title>`)
+
 func parseRumbleOGTag(body []byte, name string) string {
 	for _, m := range rumbleOGTagRegex.FindAllSubmatch(body, -1) {
 		if string(m[1]) == name {
@@ -324,52 +327,28 @@ func extractRumbleVideoURLsFromHTML(body []byte) []string {
 	return urls
 }
 
-// buildFromPlaylist fetches a Rumble user playlist page directly (yt-dlp has no
-// extractor for /playlists/ URLs) and populates the feed from the HTML.
-// Individual video URLs are stored as VideoURL so yt-dlp can download them normally.
+// buildFromPlaylist fetches a Rumble user playlist via the HTMX API endpoint
+// (yt-dlp has no extractor for /playlists/ URLs). The API returns HTML fragments
+// containing video links, which we parse with a regex. Individual video URLs are
+// stored as VideoURL so yt-dlp can download them normally.
 func (rb *RumbleBuilder) buildFromPlaylist(ctx context.Context, cfg *feed.Config, info model.Info) (*model.Feed, error) {
 	playlistID := strings.TrimPrefix(info.ItemID, "playlists/")
 	playlistURL := "https://rumble.com/playlists/" + playlistID
-
-	req, err := http.NewRequestWithContext(ctx, "GET", playlistURL, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create playlist request")
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Podsync/2.0)")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-
-	resp, err := rb.client.Do(req)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to fetch playlist page")
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, errors.Errorf("playlist page returned status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to read playlist page")
-	}
-
-	title := parseRumbleOGTag(body, "title")
-	title = strings.TrimSuffix(title, " - Rumble")
-	if title == "" {
-		title = "Rumble Playlist"
-	}
-
-	description := parseRumbleOGTag(body, "description")
-	if description == "" {
-		description = fmt.Sprintf("Rumble playlist: %s", title)
-	}
-
-	coverArt := parseRumbleOGTag(body, "image")
 
 	pageSize := cfg.PageSize
 	if pageSize == 0 {
 		pageSize = 50
 	}
+
+	// Step 1: fetch the full page for title/description/thumbnail (OG tags are SSR)
+	title, description, coverArt := rb.fetchPlaylistMeta(ctx, playlistURL)
+
+	// Step 2: fetch video list from the HTMX API endpoint
+	videoURLs, err := rb.fetchPlaylistVideoURLs(ctx, playlistID, playlistURL, pageSize)
+	if err != nil {
+		return nil, err
+	}
+	log.Infof("Rumble playlist %q: found %d video(s)", title, len(videoURLs))
 
 	_feed := &model.Feed{
 		ItemID:          info.ItemID,
@@ -387,13 +366,7 @@ func (rb *RumbleBuilder) buildFromPlaylist(ctx context.Context, cfg *feed.Config
 		ItemURL:         playlistURL,
 	}
 
-	videoURLs := extractRumbleVideoURLsFromHTML(body)
-	log.Infof("Rumble playlist %q: found %d video(s)", title, len(videoURLs))
-
 	for i, videoURL := range videoURLs {
-		if i >= pageSize {
-			break
-		}
 		episodeID, episodeTitle := extractRumbleIdAndTitle(videoURL)
 		if episodeID == "" {
 			log.Warnf("Rumble playlist entry %d: cannot extract ID from %s", i, videoURL)
@@ -415,6 +388,84 @@ func (rb *RumbleBuilder) buildFromPlaylist(ctx context.Context, cfg *feed.Config
 
 	log.Infof("Rumble playlist feed %q initialised with %d episode(s)", title, len(_feed.Episodes))
 	return _feed, nil
+}
+
+// fetchPlaylistMeta fetches the playlist page for SSR Open Graph metadata.
+func (rb *RumbleBuilder) fetchPlaylistMeta(ctx context.Context, playlistURL string) (title, description, coverArt string) {
+	req, err := http.NewRequestWithContext(ctx, "GET", playlistURL, nil)
+	if err != nil {
+		return "Rumble Playlist", "", ""
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	resp, err := rb.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return "Rumble Playlist", "", ""
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	title = parseRumbleOGTag(body, "title")
+	title = strings.TrimSuffix(title, " - Rumble")
+
+	// Fall back to <title> tag (Rumble SSR includes it even without OG tags)
+	if title == "" {
+		if m := rumbleHTMLTitleRegex.FindSubmatch(body); m != nil {
+			title = strings.TrimSpace(string(m[1]))
+		}
+	}
+	if title == "" {
+		title = "Rumble Playlist"
+	}
+
+	description = parseRumbleOGTag(body, "description")
+	if description == "" {
+		description = fmt.Sprintf("Rumble playlist: %s", title)
+	}
+
+	coverArt = parseRumbleOGTag(body, "image")
+	return
+}
+
+// fetchPlaylistVideoURLs calls Rumble's HTMX playlist API and returns video URLs.
+// The endpoint returns HTML fragments (not JSON); we regex-parse the video hrefs.
+func (rb *RumbleBuilder) fetchPlaylistVideoURLs(ctx context.Context, playlistID, playlistURL string, pageSize int) ([]string, error) {
+	apiURL := fmt.Sprintf(
+		"https://rumble.com/-playlists/htmx/get-playlist-details?playlist_id=%s&page_num=1&page_size=%d&pagination=1",
+		playlistID, pageSize,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create playlist API request")
+	}
+	// Rumble's HTMX endpoint requires these headers to return content
+	req.Header.Set("HX-Request", "true")
+	req.Header.Set("HX-Current-URL", playlistURL)
+	req.Header.Set("Referer", playlistURL)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0")
+
+	resp, err := rb.client.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to fetch playlist API")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.Errorf("playlist API returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read playlist API response")
+	}
+
+	log.Debugf("Rumble playlist API response (%d bytes): %.200s", len(body), string(body))
+
+	return extractRumbleVideoURLsFromHTML(body), nil
 }
 
 // fetchChannelMetadata makes a separate yt-dlp call without --flat-playlist
