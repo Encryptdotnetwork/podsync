@@ -296,10 +296,12 @@ var rumbleOGTagRegex2 = regexp.MustCompile(`<meta[^>]+content="([^"]*)"[^>]+prop
 // rumbleHTMLTitleRegex matches the <title> tag as a fallback for playlist name.
 var rumbleHTMLTitleRegex = regexp.MustCompile(`<title>([^<]+)</title>`)
 
-// rumbleItemRegex extracts per-item (thumbnail, video path, title) from the HTMX
-// playlist HTML. Each playlist item has: thumbnail img → video href → h3 title attr.
-// Uses (?s) so . matches newlines across multi-line attribute formatting.
-var rumbleItemRegex = regexp.MustCompile(`(?s)class="thumbnail__image[^"]*"[^>]*src="(https://[^"]+)".*?href="(/v[a-zA-Z0-9]+-[^"?]+\.html)[^"]*".*?class="thumbnail__title[^"]*"\s*title="([^"]+)"`)
+// Three focused regexes for extracting per-item fields from the HTMX playlist HTML.
+// Each video item has: 1 thumbnail__image src, 2 identical hrefs (/v...html), 1 thumbnail__title.
+// [^>] matches any char except >, including newlines, so no (?s) flag is needed.
+var rumbleThumbnailRegex = regexp.MustCompile(`class="thumbnail__image[^"]*"[^>]*src="(https://[^"]+)"`)
+var rumbleVideoHrefRegex = regexp.MustCompile(`href="(/v[a-zA-Z0-9]+-[^"?]+\.html)`)
+var rumbleTitleAttrRegex = regexp.MustCompile(`class="thumbnail__title[^"]*"[^>]*title="([^"]+)"`)
 
 // rumbleVideoIDRegex is a fallback when the href regex finds nothing.
 var rumbleVideoIDRegex = regexp.MustCompile(`data-video-id="(\d+)"`)
@@ -325,38 +327,54 @@ func parseRumbleOGTag(body []byte, name string) string {
 }
 
 func extractRumblePlaylistEntries(body []byte) []rumblePlaylistEntry {
+	// Each video item has two identical hrefs (/v...html) — one on the thumbnail link,
+	// one on the title link. Deduplicate to get one URL per video, preserving order.
+	seen := make(map[string]bool)
+	var uniqueHrefs []string
+	for _, m := range rumbleVideoHrefRegex.FindAllSubmatch(body, -1) {
+		p := string(m[1])
+		if !seen[p] {
+			seen[p] = true
+			uniqueHrefs = append(uniqueHrefs, p)
+		}
+	}
+
+	if len(uniqueHrefs) == 0 {
+		return extractRumbleEmbedFallback(body)
+	}
+
+	thumbMatches := rumbleThumbnailRegex.FindAllSubmatch(body, -1)
+	titleMatches := rumbleTitleAttrRegex.FindAllSubmatch(body, -1)
+
+	log.Debugf("Rumble playlist parse: hrefs=%d thumbs=%d titles=%d", len(uniqueHrefs), len(thumbMatches), len(titleMatches))
+
+	entries := make([]rumblePlaylistEntry, len(uniqueHrefs))
+	for i, href := range uniqueHrefs {
+		entries[i].URL = "https://rumble.com" + href
+		if i < len(thumbMatches) {
+			entries[i].Thumbnail = string(thumbMatches[i][1])
+		}
+		if i < len(titleMatches) {
+			entries[i].Title = string(titleMatches[i][1])
+		}
+	}
+	return entries
+}
+
+func extractRumbleEmbedFallback(body []byte) []rumblePlaylistEntry {
 	seen := make(map[string]bool)
 	var entries []rumblePlaylistEntry
-
-	// Primary: extract (thumbnail, href, title) together per item
-	for _, m := range rumbleItemRegex.FindAllSubmatch(body, -1) {
-		p := string(m[2])
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		entries = append(entries, rumblePlaylistEntry{
-			URL:       "https://rumble.com" + p,
-			Thumbnail: string(m[1]),
-			Title:     string(m[3]),
-		})
-	}
-
-	// Fallback: extract data-video-id values and use embed URLs (no thumbnail/title)
-	if len(entries) == 0 {
-		for _, m := range rumbleVideoIDRegex.FindAllSubmatch(body, -1) {
-			id := string(m[1])
-			embedURL := "https://rumble.com/embed/v" + id + "/"
-			if !seen[embedURL] {
-				seen[embedURL] = true
-				entries = append(entries, rumblePlaylistEntry{URL: embedURL})
-			}
-		}
-		if len(entries) > 0 {
-			log.Debugf("Rumble playlist: using embed URL fallback for %d video(s)", len(entries))
+	for _, m := range rumbleVideoIDRegex.FindAllSubmatch(body, -1) {
+		id := string(m[1])
+		embedURL := "https://rumble.com/embed/v" + id + "/"
+		if !seen[embedURL] {
+			seen[embedURL] = true
+			entries = append(entries, rumblePlaylistEntry{URL: embedURL})
 		}
 	}
-
+	if len(entries) > 0 {
+		log.Debugf("Rumble playlist: using embed URL fallback for %d video(s)", len(entries))
+	}
 	return entries
 }
 
