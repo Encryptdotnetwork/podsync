@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"expvar"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -77,6 +80,11 @@ func New(cfg Config, storage http.FileSystem, database db.Storage) *Server {
 
 	// Add health check endpoint
 	mux.HandleFunc("/health", srv.healthCheckHandler)
+
+	// Thumbnail proxy: fetches external cover art server-side so the browser
+	// avoids CDN hotlink restrictions (Sec-Fetch-Site: cross-site is blocked by
+	// some CDNs even with referrerpolicy="no-referrer").
+	mux.HandleFunc("/thumbnail", thumbnailProxyHandler)
 
 	// Optionally enable debug endpoints (disabled by default for security)
 	if cfg.DebugEndpoints {
@@ -153,4 +161,59 @@ func noIndexMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 		next.ServeHTTP(w, r)
 	})
+}
+
+var thumbnailProxyClient = &http.Client{Timeout: 10 * time.Second}
+
+// thumbnailProxyHandler fetches an external image URL server-side and returns it to
+// the browser. This bypasses CDN hotlink protection that blocks cross-origin <img>
+// requests (Sec-Fetch-Site: cross-site) even when referrerpolicy="no-referrer" is set.
+func thumbnailProxyHandler(w http.ResponseWriter, r *http.Request) {
+	rawURL := r.URL.Query().Get("url")
+	if rawURL == "" {
+		http.Error(w, "missing url parameter", http.StatusBadRequest)
+		return
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		http.Error(w, "invalid url", http.StatusBadRequest)
+		return
+	}
+
+	// Basic SSRF guard: reject requests to private/loopback addresses.
+	host := parsed.Hostname()
+	if ips, err := net.LookupHost(host); err == nil {
+		for _, ipStr := range ips {
+			if ip := net.ParseIP(ipStr); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, rawURL, nil)
+	if err != nil {
+		http.Error(w, "failed to create request", http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0")
+
+	resp, err := thumbnailProxyClient.Do(req)
+	if err != nil {
+		http.Error(w, "failed to fetch image", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "upstream returned non-200", resp.StatusCode)
+		return
+	}
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	io.Copy(w, resp.Body) //nolint:errcheck
 }
