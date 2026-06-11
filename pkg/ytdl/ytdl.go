@@ -1,6 +1,7 @@
 package ytdl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -75,9 +76,9 @@ type Config struct {
 }
 
 type YoutubeDl struct {
-	path       string
-	timeout    time.Duration
-	updateLock sync.Mutex // Don't call youtube-dl while self updating
+	path     string
+	timeout  time.Duration
+	execLock sync.RWMutex // Read-locked by regular invocations, write-locked during self update
 }
 
 func New(ctx context.Context, cfg Config) (*YoutubeDl, error) {
@@ -132,11 +133,17 @@ func New(ctx context.Context, cfg Config) (*YoutubeDl, error) {
 		}
 
 		go func() {
-			for {
-				time.Sleep(UpdatePeriod)
+			ticker := time.NewTicker(UpdatePeriod)
+			defer ticker.Stop()
 
-				if err := ytdl.Update(context.Background()); err != nil {
-					log.WithError(err).Error("update failed")
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := ytdl.Update(ctx); err != nil {
+						log.WithError(err).Error("update failed")
+					}
 				}
 			}
 		}()
@@ -178,8 +185,8 @@ func (dl *YoutubeDl) ensureDependencies(ctx context.Context) error {
 }
 
 func (dl *YoutubeDl) Update(ctx context.Context) error {
-	dl.updateLock.Lock()
-	defer dl.updateLock.Unlock()
+	dl.execLock.Lock()
+	defer dl.execLock.Unlock()
 
 	log.Info("updating youtube-dl")
 	output, err := dl.exec(ctx, "--update", "--verbose")
@@ -202,68 +209,43 @@ func (dl *YoutubeDl) PlaylistMetadata(ctx context.Context, url string) (metadata
 		"--skip-download", // Don't download videos
 		url,
 	}
-	dl.updateLock.Lock()
-	defer dl.updateLock.Unlock()
-	output, err := dl.exec(ctx, args...)
-	if err != nil {
-		log.WithError(err).Errorf("youtube-dl error: %s", url)
 
-		// YouTube might block host with HTTP Error 429: Too Many Requests
-		if strings.Contains(output, "HTTP Error 429") {
-			return PlaylistMetadata{}, ErrTooManyRequests
-		}
-
-		log.Error(output)
-		return PlaylistMetadata{}, errors.New(output)
-	}
-
-	// Debug logging: print first 2000 chars of raw JSON output
-	if len(output) > 2000 {
-		log.Debugf("yt-dlp raw JSON output (first 2000 chars): %s...", output[:2000])
-	} else {
-		log.Debugf("yt-dlp raw JSON output: %s", output)
-	}
+	dl.execLock.RLock()
+	defer dl.execLock.RUnlock()
 
 	var playlistMetadata PlaylistMetadata
-	if err := json.Unmarshal([]byte(output), &playlistMetadata); err != nil {
-		log.WithError(err).Errorf("failed to unmarshal yt-dlp JSON output: %v", err)
-		return PlaylistMetadata{}, errors.Wrap(err, "failed to parse yt-dlp JSON")
+	if err := dl.execJSON(ctx, &playlistMetadata, args...); err != nil {
+		log.WithError(err).Errorf("youtube-dl error: %s", url)
+		return PlaylistMetadata{}, err
 	}
 
 	log.Infof("Parsed metadata: %d entries found", len(playlistMetadata.Entries))
 	return playlistMetadata, nil
 }
 
-// ChannelMetadata fetches channel-only metadata without entries (no --flat-playlist)
-// Used to get channel title, description, and other channel-level information
+// ChannelMetadata fetches channel-level metadata (title, description, author).
+// It runs with --flat-playlist and --playlist-items 1 so youtube-dl doesn't resolve
+// per-video metadata for the entire channel; callers only consume channel-level fields.
 func (dl *YoutubeDl) ChannelMetadata(ctx context.Context, url string) (metadata PlaylistMetadata, err error) {
 	log.Info("getting channel metadata for: ", url)
 	args := []string{
-		"-J",              // JSON output
-		"-q",              // quiet mode
-		"--no-warnings",   // suppress warnings
-		"--skip-download", // Don't download videos
+		"--flat-playlist",  // Don't resolve individual video metadata
+		"--playlist-items", // Entries are not consumed by callers,
+		"1",                // so fetch a single channel page only
+		"-J",               // JSON output
+		"-q",               // quiet mode
+		"--no-warnings",    // suppress warnings
+		"--skip-download",  // Don't download videos
 		url,
 	}
-	dl.updateLock.Lock()
-	defer dl.updateLock.Unlock()
-	output, err := dl.exec(ctx, args...)
-	if err != nil {
-		log.WithError(err).Errorf("youtube-dl error fetching channel metadata: %s", url)
 
-		// YouTube might block host with HTTP Error 429: Too Many Requests
-		if strings.Contains(output, "HTTP Error 429") {
-			return PlaylistMetadata{}, ErrTooManyRequests
-		}
-
-		log.Error(output)
-		return PlaylistMetadata{}, errors.New(output)
-	}
+	dl.execLock.RLock()
+	defer dl.execLock.RUnlock()
 
 	var channelMetadata PlaylistMetadata
-	if err := json.Unmarshal([]byte(output), &channelMetadata); err != nil {
-		log.WithError(err).Debugf("failed to unmarshal channel metadata JSON, may not be a channel: %v", err)
-		return PlaylistMetadata{}, errors.Wrap(err, "failed to parse channel metadata JSON")
+	if err := dl.execJSON(ctx, &channelMetadata, args...); err != nil {
+		log.WithError(err).Errorf("youtube-dl error fetching channel metadata: %s", url)
+		return PlaylistMetadata{}, err
 	}
 
 	log.Debugf("Channel metadata retrieved: title=%q, channel=%q, description=%q",
@@ -292,8 +274,8 @@ func (dl *YoutubeDl) Download(ctx context.Context, feedConfig *feed.Config, epis
 
 	args := buildArgs(feedConfig, episode, filePath)
 
-	dl.updateLock.Lock()
-	defer dl.updateLock.Unlock()
+	dl.execLock.RLock()
+	defer dl.execLock.RUnlock()
 
 	output, err := dl.exec(ctx, args...)
 	if err != nil {
@@ -330,6 +312,70 @@ func (dl *YoutubeDl) exec(ctx context.Context, args ...string) (string, error) {
 	}
 
 	return string(output), nil
+}
+
+// execJSON runs youtube-dl and decodes its stdout JSON directly into v, so large
+// playlist dumps are not buffered in memory as a string before parsing.
+// stderr is captured (capped) for error reporting and 429 detection.
+func (dl *YoutubeDl) execJSON(ctx context.Context, v interface{}, args ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, dl.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, dl.path, args...)
+
+	var stderr cappedBuffer
+	cmd.Stderr = &stderr
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return errors.Wrap(err, "failed to create stdout pipe")
+	}
+
+	if err := cmd.Start(); err != nil {
+		return errors.Wrap(err, "failed to start youtube-dl")
+	}
+
+	decodeErr := json.NewDecoder(stdout).Decode(v)
+	// Drain any remaining stdout so the process is not blocked on a full pipe
+	io.Copy(io.Discard, stdout) //nolint:errcheck
+
+	if err := cmd.Wait(); err != nil {
+		// YouTube might block host with HTTP Error 429: Too Many Requests
+		if strings.Contains(stderr.String(), "HTTP Error 429") {
+			return ErrTooManyRequests
+		}
+
+		return errors.Wrapf(err, "youtube-dl failed: %s", stderr.String())
+	}
+
+	if decodeErr != nil {
+		return errors.Wrap(decodeErr, "failed to parse youtube-dl JSON output")
+	}
+
+	return nil
+}
+
+// maxStderrBytes limits how much of youtube-dl's stderr is retained for error messages.
+const maxStderrBytes = 64 * 1024
+
+// cappedBuffer accepts all writes but retains only the first maxStderrBytes.
+type cappedBuffer struct {
+	buf bytes.Buffer
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if remaining := maxStderrBytes - b.buf.Len(); remaining > 0 {
+		if len(p) > remaining {
+			b.buf.Write(p[:remaining])
+		} else {
+			b.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+func (b *cappedBuffer) String() string {
+	return b.buf.String()
 }
 
 func buildArgs(feedConfig *feed.Config, episode *model.Episode, outputFilePath string) []string {

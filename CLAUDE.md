@@ -313,6 +313,7 @@ debug = false
 
 ### Local Storage
 - Files stored in `{data_dir}/{feed_id}/{episode_name}`
+- All writes (episodes, feed XML, OPML) are atomic: content is written to a temp file in the destination directory, then renamed into place, so clients never observe partially written files (same-directory temp avoids EXDEV across Docker volume mounts)
 - Web UI served from `./html/index.html` if enabled
 
 ### S3 Storage

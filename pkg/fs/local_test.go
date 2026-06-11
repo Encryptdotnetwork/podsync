@@ -85,6 +85,41 @@ func TestLocal_Delete(t *testing.T) {
 	assert.True(t, errors.Is(err, os.ErrNotExist))
 }
 
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
+}
+
+func TestLocal_CreateAtomic(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "")
+	assert.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	stor, err := NewLocal(tmpDir, false, false)
+	assert.NoError(t, err)
+
+	// A failed write must leave neither the destination file nor a temp file behind
+	_, err = stor.Create(testCtx, "1/test", errReader{})
+	assert.Error(t, err)
+
+	entries, err := os.ReadDir(filepath.Join(tmpDir, "1"))
+	assert.NoError(t, err)
+	assert.Empty(t, entries)
+
+	// Create must overwrite an existing file (rename over destination)
+	_, err = stor.Create(testCtx, "1/test", bytes.NewReader([]byte{1, 2, 3}))
+	assert.NoError(t, err)
+
+	written, err := stor.Create(testCtx, "1/test", bytes.NewReader([]byte{4, 5, 6, 7}))
+	assert.NoError(t, err)
+	assert.EqualValues(t, 4, written)
+
+	sz, err := stor.Size(testCtx, "1/test")
+	assert.NoError(t, err)
+	assert.EqualValues(t, 4, sz)
+}
+
 func TestLocal_copyFile(t *testing.T) {
 	reader := bytes.NewReader([]byte{1, 2, 4})
 	tmpDir, err := os.MkdirTemp("", "")

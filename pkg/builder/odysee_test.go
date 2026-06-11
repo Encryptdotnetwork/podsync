@@ -105,9 +105,9 @@ func TestParseRSSPubDate(t *testing.T) {
 
 func TestParseRSSDuration(t *testing.T) {
 	tests := []struct {
-		name    string
-		input   string
-		want    int64
+		name  string
+		input string
+		want  int64
 	}{
 		{
 			name:  "seconds format",

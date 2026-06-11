@@ -36,12 +36,12 @@ type rssImage struct {
 }
 
 type rssItem struct {
-	Title       string    `xml:"title"`
-	Link        string    `xml:"link"`
-	Description string    `xml:"description"`
-	PubDate     string    `xml:"pubDate"`
-	Thumbnail   rssImage  `xml:"image"`
-	Duration    string    `xml:"duration"`
+	Title       string       `xml:"title"`
+	Link        string       `xml:"link"`
+	Description string       `xml:"description"`
+	PubDate     string       `xml:"pubDate"`
+	Thumbnail   rssImage     `xml:"image"`
+	Duration    string       `xml:"duration"`
 	Enclosure   rssEnclosure `xml:"enclosure"`
 }
 
