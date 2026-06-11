@@ -1,13 +1,16 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"expvar"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -163,11 +166,80 @@ func noIndexMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-var thumbnailProxyClient = &http.Client{Timeout: 10 * time.Second}
+// thumbnailAllowedHosts are CDN domains (matched by exact name or subdomain)
+// that the thumbnail proxy will fetch from. Anything else is rejected.
+var thumbnailAllowedHosts = []string{
+	"ytimg.com", "ggpht.com", "googleusercontent.com", // YouTube
+	"rumble.com", "rmbl.ws", "rumble.cloud", "1a-1791.com", // Rumble
+	"odycdn.com", "odysee.com", "lbry.com", "spee.ch", // Odysee
+	"vimeocdn.com", "sndcdn.com", "jtvnw.net", // Vimeo, SoundCloud, Twitch
+}
+
+func thumbnailHostAllowed(host string) bool {
+	host = strings.ToLower(host)
+	for _, allowed := range thumbnailAllowedHosts {
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDisallowedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+}
+
+// safeDialContext resolves the target itself, rejects the connection if any
+// resolved address is private/loopback, and dials a vetted IP directly so a
+// second DNS answer can't redirect the connection elsewhere (DNS rebinding).
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, ip := range ips {
+		if isDisallowedIP(ip.IP) {
+			return nil, fmt.Errorf("host %q resolves to disallowed address %s", host, ip.IP)
+		}
+	}
+
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no addresses found for host %q", host)
+	}
+
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+}
+
+// maxThumbnailBytes caps proxied image responses.
+const maxThumbnailBytes = 10 << 20 // 10 MB
+
+var thumbnailProxyClient = &http.Client{
+	Timeout:   10 * time.Second,
+	Transport: &http.Transport{DialContext: safeDialContext},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return errors.New("too many redirects")
+		}
+		if !thumbnailHostAllowed(req.URL.Hostname()) {
+			return fmt.Errorf("redirect to disallowed host %q", req.URL.Hostname())
+		}
+		return nil
+	},
+}
 
 // thumbnailProxyHandler fetches an external image URL server-side and returns it to
 // the browser. This bypasses CDN hotlink protection that blocks cross-origin <img>
 // requests (Sec-Fetch-Site: cross-site) even when referrerpolicy="no-referrer" is set.
+// Only known thumbnail CDN hosts are proxied, and connections to private/loopback
+// addresses are blocked at the dialer level (SSRF protection).
 func thumbnailProxyHandler(w http.ResponseWriter, r *http.Request) {
 	rawURL := r.URL.Query().Get("url")
 	if rawURL == "" {
@@ -181,15 +253,9 @@ func thumbnailProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Basic SSRF guard: reject requests to private/loopback addresses.
-	host := parsed.Hostname()
-	if ips, err := net.LookupHost(host); err == nil {
-		for _, ipStr := range ips {
-			if ip := net.ParseIP(ipStr); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-		}
+	if !thumbnailHostAllowed(parsed.Hostname()) {
+		http.Error(w, "forbidden host", http.StatusForbidden)
+		return
 	}
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, rawURL, nil)
@@ -215,5 +281,5 @@ func thumbnailProxyHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	io.Copy(w, resp.Body) //nolint:errcheck
+	io.Copy(w, io.LimitReader(resp.Body, maxThumbnailBytes)) //nolint:errcheck
 }

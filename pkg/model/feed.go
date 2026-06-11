@@ -41,6 +41,9 @@ type Episode struct {
 	Size        int64         `json:"size"`
 	Order       string        `json:"order"`
 	Status      EpisodeStatus `json:"status"` // Disk status
+	// Retries counts failed download attempts. Episodes reaching the retry limit
+	// are skipped by future update cycles (deleted, geo-blocked or private videos).
+	Retries int `json:"retries,omitempty"`
 }
 
 type Feed struct {

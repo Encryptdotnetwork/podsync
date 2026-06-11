@@ -102,3 +102,50 @@ func TestExtractRumblePlaylistEntries_EmptyHTML(t *testing.T) {
 	entries := extractRumblePlaylistEntries([]byte("<html></html>"))
 	assert.Empty(t, entries)
 }
+
+// A video missing its thumbnail must not shift the thumbnails/titles of the
+// videos that follow it (regression test for positional zip association).
+func TestExtractRumblePlaylistEntries_MissingThumbnailNoMisalignment(t *testing.T) {
+	html3 := htmlFromLogs + `
+<li class="videostream__details min-w-0" data-video-id="999">
+<div class="videostream videostream__list-item" data-video-id="999">
+<div class="thumbnail__thumb">
+<a class="videostream__link link" href="/v99zzzzz-second-video.html?playlist_id=abc" ></a>
+</div>
+<div class="videostream__footer">
+<a class="title__link link" href="/v99zzzzz-second-video.html?playlist_id=abc">
+<h3 class="thumbnail__title line-clamp-2" title="Second Video Title">Second Video Title</h3>
+</a>
+</div>
+</div>
+</li>
+<li class="videostream__details min-w-0" data-video-id="1000">
+<div class="videostream videostream__list-item" data-video-id="1000">
+<div class="thumbnail__thumb">
+<img
+class="thumbnail__image "
+src="https://example.com/thumb3.jpg"
+loading="lazy">
+<a class="videostream__link link" href="/v10aaaaa-third-video.html?playlist_id=abc" ></a>
+</div>
+<div class="videostream__footer">
+<a class="title__link link" href="/v10aaaaa-third-video.html?playlist_id=abc">
+<h3 class="thumbnail__title line-clamp-2" title="Third Video Title">Third Video Title</h3>
+</a>
+</div>
+</div>
+</li>
+`
+	entries := extractRumblePlaylistEntries([]byte(html3))
+	require.Len(t, entries, 3)
+
+	// Second video has no thumbnail: its field stays empty
+	assert.Equal(t, "https://rumble.com/v99zzzzz-second-video.html", entries[1].URL)
+	assert.Empty(t, entries[1].Thumbnail)
+	assert.Equal(t, "Second Video Title", entries[1].Title)
+
+	// Third video must keep its OWN thumbnail and title, not inherit shifted ones
+	assert.Equal(t, "https://rumble.com/v10aaaaa-third-video.html", entries[2].URL)
+	assert.Equal(t, "https://example.com/thumb3.jpg", entries[2].Thumbnail)
+	assert.Equal(t, "Third Video Title", entries[2].Title)
+}

@@ -306,6 +306,7 @@ debug = false
 - `/{path}/podsync.opml` - OPML export (feeds with `opml = true`)
 - `/{path}/index.html` - Web UI (if enabled, local storage only)
 - `/health` - Health check (returns 503 if episodes failed in last 24h)
+- `/thumbnail?url=...` - Server-side thumbnail proxy (bypasses CDN hotlink protection); restricted to an allowlist of known thumbnail CDN hosts (YouTube, Rumble, Odysee, Vimeo, SoundCloud, Twitch), with dialer-level blocking of private/loopback addresses, redirect re-validation, and a 10MB response cap
 - `/debug/vars` - Runtime metrics (if `debug_endpoints = true`)
 - `/robots.txt` - Search engine blocking (if `no_index = true`)
 
@@ -330,8 +331,9 @@ debug = false
 
 ## Error Handling
 
-- YouTube 429 (rate limit): stops current batch, retries next cycle
-- Download failures: episode status set to `EpisodeError`, retried next cycle
+- HTTP 429 (rate limit): stops the current batch and puts the feed in exponential backoff (15m, 30m, 1h, capped at 2h); updates are skipped until the backoff window expires, and a successful update resets it
+- A 429 during the metadata phase does not abort the update: downloads are skipped for that cycle but the XML feed is still rebuilt from the database so the served feed stays intact
+- Download failures: episode status set to `EpisodeError` with a retry counter; retried on subsequent cycles up to 5 attempts, then skipped permanently (deleted/geo-blocked/private videos)
 - API failures: logged, scheduler continues with other feeds
 - Download timeout: configurable via `downloader.timeout` (default 15 minutes)
 - Hooks available for error notification (`on_episode_download_error`)

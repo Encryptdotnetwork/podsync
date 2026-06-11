@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
@@ -29,6 +30,22 @@ type Downloader interface {
 
 type TokenList []string
 
+const (
+	// maxDownloadAttempts is how many times a failing episode is retried before
+	// being skipped permanently (deleted, geo-blocked or private videos).
+	maxDownloadAttempts = 5
+
+	// Exponential backoff applied to a feed after the platform responds with
+	// HTTP 429 (Too Many Requests): 15m, 30m, 1h, 2h, 2h, ...
+	rateLimitBackoffInitial = 15 * time.Minute
+	rateLimitBackoffMax     = 2 * time.Hour
+)
+
+type feedBackoff struct {
+	delay time.Duration
+	until time.Time
+}
+
 type Manager struct {
 	hostname   string
 	downloader Downloader
@@ -36,6 +53,9 @@ type Manager struct {
 	fs         fs.Storage
 	feeds      map[string]*feed.Config
 	keys       map[model.Provider]feed.KeyProvider
+
+	backoffMu sync.Mutex
+	backoffs  map[string]*feedBackoff // per-feed rate-limit backoff state
 }
 
 func NewUpdater(
@@ -53,10 +73,58 @@ func NewUpdater(
 		fs:         fs,
 		feeds:      feeds,
 		keys:       keys,
+		backoffs:   make(map[string]*feedBackoff),
 	}, nil
 }
 
+// inBackoff reports whether feed updates are temporarily suspended due to rate limiting.
+func (u *Manager) inBackoff(feedID string) (time.Time, bool) {
+	u.backoffMu.Lock()
+	defer u.backoffMu.Unlock()
+
+	b, ok := u.backoffs[feedID]
+	if !ok || time.Now().After(b.until) {
+		return time.Time{}, false
+	}
+
+	return b.until, true
+}
+
+// registerRateLimit doubles the feed's backoff window (up to rateLimitBackoffMax)
+// and returns the delay applied.
+func (u *Manager) registerRateLimit(feedID string) time.Duration {
+	u.backoffMu.Lock()
+	defer u.backoffMu.Unlock()
+
+	b, ok := u.backoffs[feedID]
+	if !ok {
+		b = &feedBackoff{delay: rateLimitBackoffInitial}
+		u.backoffs[feedID] = b
+	} else {
+		b.delay *= 2
+		if b.delay > rateLimitBackoffMax {
+			b.delay = rateLimitBackoffMax
+		}
+	}
+
+	b.until = time.Now().Add(b.delay)
+	return b.delay
+}
+
+func (u *Manager) clearBackoff(feedID string) {
+	u.backoffMu.Lock()
+	defer u.backoffMu.Unlock()
+
+	delete(u.backoffs, feedID)
+}
+
 func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
+	if until, ok := u.inBackoff(feedConfig.ID); ok {
+		log.WithField("feed_id", feedConfig.ID).
+			Warnf("skipping update: rate limited, next attempt after %s", until.Format(time.RFC3339))
+		return nil
+	}
+
 	log.WithFields(log.Fields{
 		"feed_id": feedConfig.ID,
 		"format":  feedConfig.Format,
@@ -64,19 +132,38 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 	}).Infof("-> updating %s", feedConfig.URL)
 
 	started := time.Now()
+	rateLimited := false
 
 	if err := u.updateFeed(ctx, feedConfig); err != nil {
-		return errors.Wrap(err, "update failed")
+		if !errors.Is(err, ytdl.ErrTooManyRequests) {
+			return errors.Wrap(err, "update failed")
+		}
+
+		// Rate limited during metadata fetch: skip downloads this cycle, but fall
+		// through to rebuild the XML from the database so the served feed stays intact.
+		delay := u.registerRateLimit(feedConfig.ID)
+		log.WithField("feed_id", feedConfig.ID).
+			Warnf("rate limited while fetching feed metadata, backing off for %s", delay)
+		rateLimited = true
 	}
 
-	// Fetch episodes for download
-	episodesToDownload, err := u.fetchEpisodes(ctx, feedConfig)
-	if err != nil {
-		return errors.Wrap(err, "fetch episodes failed")
-	}
+	if !rateLimited {
+		// Fetch episodes for download
+		episodesToDownload, err := u.fetchEpisodes(ctx, feedConfig)
+		if err != nil {
+			return errors.Wrap(err, "fetch episodes failed")
+		}
 
-	if err := u.downloadEpisodes(ctx, feedConfig, episodesToDownload); err != nil {
-		return errors.Wrap(err, "download failed")
+		rateLimited, err = u.downloadEpisodes(ctx, feedConfig, episodesToDownload)
+		if err != nil {
+			return errors.Wrap(err, "download failed")
+		}
+
+		if rateLimited {
+			delay := u.registerRateLimit(feedConfig.ID)
+			log.WithField("feed_id", feedConfig.ID).
+				Warnf("rate limited while downloading episodes, backing off for %s", delay)
+		}
 	}
 
 	if err := u.cleanup(ctx, feedConfig); err != nil {
@@ -89,6 +176,10 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 
 	if err := u.buildOPML(ctx); err != nil {
 		return errors.Wrap(err, "opml build failed")
+	}
+
+	if !rateLimited {
+		u.clearBackoff(feedConfig.ID)
 	}
 
 	elapsed := time.Since(started)
@@ -174,6 +265,11 @@ func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([
 			return nil
 		}
 
+		if episode.Status == model.EpisodeError && episode.Retries >= maxDownloadAttempts {
+			logger.Warnf("skipping: download failed %d times, giving up", episode.Retries)
+			return nil
+		}
+
 		if !matchFilters(episode, &feedConfig.Filters) {
 			return nil
 		}
@@ -196,7 +292,9 @@ func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([
 	return downloadList, nil
 }
 
-func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config, downloadList []*model.Episode) error {
+// downloadEpisodes downloads the given episodes to storage. It returns rateLimited = true
+// if the remote server responded with HTTP 429 and the batch was cut short.
+func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config, downloadList []*model.Episode) (rateLimited bool, err error) {
 	var (
 		downloadCount = len(downloadList)
 		downloaded    = 0
@@ -207,7 +305,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		log.Infof("download count: %d", downloadCount)
 	} else {
 		log.Info("no episodes to download")
-		return nil
+		return false, nil
 	}
 
 	// Download pending episodes
@@ -230,7 +328,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 				return nil
 			}); err != nil {
 				logger.WithError(err).Error("failed to update file info")
-				return err
+				return false, err
 			}
 
 			continue
@@ -238,7 +336,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			// Will download, do nothing here
 		} else {
 			logger.WithError(err).Error("failed to stat file")
-			return err
+			return false, err
 		}
 
 		// Download episode to disk
@@ -250,10 +348,10 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		if err != nil {
 			// YouTube might block host with HTTP Error 429: Too Many Requests
 			// We still need to generate XML, so just stop sending download requests and
-			// retry next time
-			if err == ytdl.ErrTooManyRequests {
+			// retry after the backoff window
+			if errors.Is(err, ytdl.ErrTooManyRequests) {
 				logger.Warn("server responded with a 'Too Many Requests' error")
-				break
+				return true, nil
 			}
 
 			// Execute episode download error hooks
@@ -275,9 +373,13 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 
 			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
 				episode.Status = model.EpisodeError
+				episode.Retries++
+				if episode.Retries >= maxDownloadAttempts {
+					logger.Warnf("episode failed %d times, it will no longer be retried", episode.Retries)
+				}
 				return nil
 			}); err != nil {
-				return err
+				return false, err
 			}
 
 			continue
@@ -288,7 +390,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		tempFile.Close()
 		if err != nil {
 			logger.WithError(err).Error("failed to copy file")
-			return err
+			return false, err
 		}
 
 		// Execute post episode download hooks
@@ -316,14 +418,14 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			episode.Status = model.EpisodeDownloaded
 			return nil
 		}); err != nil {
-			return err
+			return false, err
 		}
 
 		downloaded++
 	}
 
 	log.Infof("downloaded %d episode(s)", downloaded)
-	return nil
+	return false, nil
 }
 
 func (u *Manager) buildXML(ctx context.Context, feedConfig *feed.Config) error {

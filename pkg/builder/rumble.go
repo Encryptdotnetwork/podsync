@@ -289,6 +289,9 @@ func extractVideoIdFromRumbleUrl(rumbleUrl string) string {
 	return id
 }
 
+// maxRumbleResponseBytes caps Rumble page/API responses read into memory.
+const maxRumbleResponseBytes = 5 << 20 // 5 MB
+
 // rumbleOGTagRegex matches Open Graph meta tags in either attribute order.
 var rumbleOGTagRegex = regexp.MustCompile(`<meta[^>]+property="og:([^"]+)"[^>]+content="([^"]*)"`)
 var rumbleOGTagRegex2 = regexp.MustCompile(`<meta[^>]+content="([^"]*)"[^>]+property="og:([^"]+)"`)
@@ -328,37 +331,74 @@ func parseRumbleOGTag(body []byte, name string) string {
 
 func extractRumblePlaylistEntries(body []byte) []rumblePlaylistEntry {
 	// Each video item has two identical hrefs (/v...html) — one on the thumbnail link,
-	// one on the title link. Deduplicate to get one URL per video, preserving order.
-	seen := make(map[string]bool)
-	var uniqueHrefs []string
-	for _, m := range rumbleVideoHrefRegex.FindAllSubmatch(body, -1) {
-		p := string(m[1])
-		if !seen[p] {
-			seen[p] = true
-			uniqueHrefs = append(uniqueHrefs, p)
+	// one on the title link. The first occurrence of each unique href anchors the item:
+	// the item's thumbnail precedes its href in the markup, and its title follows it.
+	// Associating fields by byte offset between neighboring anchors keeps entries
+	// aligned even when an item is missing its thumbnail or title.
+	type itemAnchor struct {
+		href  string
+		start int
+	}
+
+	var (
+		anchors []itemAnchor
+		seen    = make(map[string]bool)
+	)
+
+	for _, m := range rumbleVideoHrefRegex.FindAllSubmatchIndex(body, -1) {
+		href := string(body[m[2]:m[3]])
+		if !seen[href] {
+			seen[href] = true
+			anchors = append(anchors, itemAnchor{href: href, start: m[0]})
 		}
 	}
 
-	if len(uniqueHrefs) == 0 {
+	if len(anchors) == 0 {
 		return extractRumbleEmbedFallback(body)
 	}
 
-	thumbMatches := rumbleThumbnailRegex.FindAllSubmatch(body, -1)
-	titleMatches := rumbleTitleAttrRegex.FindAllSubmatch(body, -1)
+	thumbMatches := rumbleThumbnailRegex.FindAllSubmatchIndex(body, -1)
+	titleMatches := rumbleTitleAttrRegex.FindAllSubmatchIndex(body, -1)
 
-	log.Debugf("Rumble playlist parse: hrefs=%d thumbs=%d titles=%d", len(uniqueHrefs), len(thumbMatches), len(titleMatches))
+	log.Debugf("Rumble playlist parse: hrefs=%d thumbs=%d titles=%d", len(anchors), len(thumbMatches), len(titleMatches))
 
-	entries := make([]rumblePlaylistEntry, len(uniqueHrefs))
-	for i, href := range uniqueHrefs {
-		entries[i].URL = "https://rumble.com" + href
-		if i < len(thumbMatches) {
-			entries[i].Thumbnail = string(thumbMatches[i][1])
+	entries := make([]rumblePlaylistEntry, len(anchors))
+	for i, anchor := range anchors {
+		prevStart := -1
+		if i > 0 {
+			prevStart = anchors[i-1].start
 		}
-		if i < len(titleMatches) {
-			entries[i].Title = string(titleMatches[i][1])
+		nextStart := len(body)
+		if i+1 < len(anchors) {
+			nextStart = anchors[i+1].start
 		}
+
+		entries[i].URL = "https://rumble.com" + anchor.href
+		entries[i].Thumbnail = lastMatchBetween(body, thumbMatches, prevStart, anchor.start)
+		entries[i].Title = firstMatchBetween(body, titleMatches, anchor.start, nextStart)
 	}
 	return entries
+}
+
+// firstMatchBetween returns the first capture group whose match starts in (from, to).
+func firstMatchBetween(body []byte, matches [][]int, from, to int) string {
+	for _, m := range matches {
+		if m[0] > from && m[0] < to {
+			return string(body[m[2]:m[3]])
+		}
+	}
+	return ""
+}
+
+// lastMatchBetween returns the last capture group whose match starts in (from, to).
+func lastMatchBetween(body []byte, matches [][]int, from, to int) string {
+	result := ""
+	for _, m := range matches {
+		if m[0] > from && m[0] < to {
+			result = string(body[m[2]:m[3]])
+		}
+	}
+	return result
 }
 
 func extractRumbleEmbedFallback(body []byte) []rumblePlaylistEntry {
@@ -456,12 +496,16 @@ func (rb *RumbleBuilder) fetchPlaylistMeta(ctx context.Context, playlistURL stri
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
 	resp, err := rb.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		return "Rumble Playlist", "", ""
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "Rumble Playlist", "", ""
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxRumbleResponseBytes))
 
 	title = parseRumbleOGTag(body, "title")
 	title = strings.TrimSuffix(title, " - Rumble")
@@ -514,7 +558,7 @@ func (rb *RumbleBuilder) fetchPlaylistVideoURLs(ctx context.Context, playlistID,
 		return nil, errors.Errorf("playlist API returned status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRumbleResponseBytes))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to read playlist API response")
 	}

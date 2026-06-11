@@ -10,6 +10,7 @@ import (
 
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/mxpv/podsync/pkg/model"
 )
@@ -88,18 +89,27 @@ func (o *OdyseeBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fee
 	feedModel.CoverArt = rssFeed.Channel.Image.URL
 
 	// Parse episodes from RSS items
-	var added = 0
+	var (
+		added       = 0
+		lastPubDate time.Time
+	)
 	for _, item := range rssFeed.Channel.Items {
 		pubDate, err := parseRSSPubDate(item.PubDate)
 		if err != nil {
-			pubDate = time.Now().UTC()
+			// RSS items are newest-first: slot unparseable dates just below the
+			// previous item so episode order stays deterministic instead of the
+			// episode jumping to the top of the feed
+			log.Warnf("failed to parse Odysee pubDate %q for %q", item.PubDate, item.Title)
+			if !lastPubDate.IsZero() {
+				pubDate = lastPubDate.Add(-time.Second)
+			} else {
+				pubDate = time.Now().UTC()
+			}
 		}
+		lastPubDate = pubDate
 
 		// Parse duration if available (format: HH:MM:SS or seconds)
 		duration := parseRSSDuration(item.Duration)
-
-		// Extract video URL from the item link
-		videoURL := extractOdyseeVideoURL(item.Link)
 
 		episode := &model.Episode{
 			ID:          extractOdyseeVideoID(item.Link),
@@ -107,7 +117,7 @@ func (o *OdyseeBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fee
 			Description: item.Description,
 			Duration:    duration,
 			PubDate:     pubDate,
-			VideoURL:    videoURL,
+			VideoURL:    item.Link,
 			Status:      model.EpisodeNew,
 		}
 
@@ -116,12 +126,12 @@ func (o *OdyseeBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fee
 			episode.Thumbnail = item.Thumbnail.URL
 		}
 
-		// Rough size estimate based on duration and format
-		// Assume ~1MB per minute for video, ~100KB per minute for audio
+		// Size estimate from duration, using the same bytes-per-second constants
+		// as the YouTube builder (RSS provides no real file size)
 		if cfg.Format == model.FormatAudio {
-			episode.Size = duration * 60 * 100000 / 60 // 100KB per second
+			episode.Size = duration * highAudioBytesPerSecond // 16 KB/s ≈ 1 MB/min
 		} else {
-			episode.Size = duration * 1000000 // ~1MB per second (very rough)
+			episode.Size = duration * hdBytesPerSecond // 350 KB/s ≈ 21 MB/min
 		}
 
 		feedModel.Episodes = append(feedModel.Episodes, episode)
@@ -205,17 +215,6 @@ func parseRSSDuration(durationStr string) int64 {
 	var seconds int64
 	fmt.Sscanf(strings.TrimSpace(durationStr), "%d", &seconds)
 	return seconds
-}
-
-func extractOdyseeVideoURL(link string) string {
-	// Ensure the video link points to odysee.com
-	if strings.Contains(link, "odysee.com") {
-		return link
-	}
-
-	// If it's a different host, try to reconstruct as an Odysee URL
-	// This is a fallback; RSS should provide proper odysee.com links
-	return link
 }
 
 func extractOdyseeVideoID(link string) string {
