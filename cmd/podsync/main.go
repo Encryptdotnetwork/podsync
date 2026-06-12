@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jessevdk/go-flags"
+	"github.com/mxpv/podsync/pkg/config"
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/model"
 	"github.com/mxpv/podsync/services/migrate"
@@ -91,7 +92,7 @@ func main() {
 
 	// Load TOML file
 	log.Debugf("loading configuration %q", opts.ConfigPath)
-	cfg, err := LoadConfig(opts.ConfigPath)
+	cfg, err := config.LoadConfig(opts.ConfigPath)
 	if err != nil {
 		log.WithError(err).Fatal("failed to load configuration file")
 	}
