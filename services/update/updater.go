@@ -118,6 +118,28 @@ func (u *Manager) clearBackoff(feedID string) {
 	delete(u.backoffs, feedID)
 }
 
+// CarryBackoffs copies the still-active rate-limit backoff state from prev so
+// that a configuration reload cannot be used to bypass a 429 cool-down window.
+func (u *Manager) CarryBackoffs(prev *Manager) {
+	if prev == nil {
+		return
+	}
+
+	prev.backoffMu.Lock()
+	defer prev.backoffMu.Unlock()
+
+	u.backoffMu.Lock()
+	defer u.backoffMu.Unlock()
+
+	now := time.Now()
+	for feedID, b := range prev.backoffs {
+		if now.After(b.until) {
+			continue // expired, no need to carry
+		}
+		u.backoffs[feedID] = b
+	}
+}
+
 func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 	if until, ok := u.inBackoff(feedConfig.ID); ok {
 		log.WithField("feed_id", feedConfig.ID).

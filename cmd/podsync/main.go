@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,12 +10,9 @@ import (
 
 	"github.com/jessevdk/go-flags"
 	"github.com/mxpv/podsync/pkg/config"
-	"github.com/mxpv/podsync/pkg/feed"
-	"github.com/mxpv/podsync/pkg/model"
 	"github.com/mxpv/podsync/services/migrate"
 	"github.com/mxpv/podsync/services/update"
 	"github.com/mxpv/podsync/services/web"
-	"github.com/robfig/cron/v3"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -90,12 +86,14 @@ func main() {
 		"arch":    arch,
 	}).Info("running podsync")
 
-	// Load TOML file
+	// Load TOML file; the store owns config.toml from here on and publishes
+	// hot-reload events consumed by the scheduler
 	log.Debugf("loading configuration %q", opts.ConfigPath)
-	cfg, err := config.LoadConfig(opts.ConfigPath)
+	store, err := config.NewStore(opts.ConfigPath)
 	if err != nil {
 		log.WithError(err).Fatal("failed to load configuration file")
 	}
+	cfg := store.Get()
 
 	if cfg.Log.Filename != "" {
 		log.Infof("Using log file: %s", cfg.Log.Filename)
@@ -164,36 +162,19 @@ func main() {
 		log.WithError(err).Fatal("youtube-dl error")
 	}
 
-	// Run updater thread
-	log.Debug("creating key providers")
-	keys := map[model.Provider]feed.KeyProvider{}
-	for name, list := range cfg.Tokens {
-		provider, err := feed.NewKeyProvider(list)
-		if err != nil {
-			log.WithError(err).Fatalf("failed to create key provider for %q", name)
-		}
-		keys[name] = provider
-	}
-
-	// Register providers that don't require API keys
-	if _, ok := keys[model.ProviderOdysee]; !ok {
-		keys[model.ProviderOdysee] = feed.NewNoOpKeyProvider()
-	}
-	if _, ok := keys[model.ProviderSoundcloud]; !ok {
-		keys[model.ProviderSoundcloud] = feed.NewNoOpKeyProvider()
-	}
-	if _, ok := keys[model.ProviderRumble]; !ok {
-		keys[model.ProviderRumble] = feed.NewNoOpKeyProvider()
-	}
-
-	log.Debug("creating update manager")
-	manager, err := update.NewUpdater(cfg.Feeds, keys, cfg.Server.Hostname, downloader, database, storage)
-	if err != nil {
-		log.WithError(err).Fatal("failed to create updater")
-	}
-
 	// In Headless mode, do one round of feed updates and quit
 	if opts.Headless {
+		log.Debug("creating update manager")
+		keys, err := update.KeyProviders(cfg.Tokens)
+		if err != nil {
+			log.WithError(err).Fatal("failed to create key providers")
+		}
+
+		manager, err := update.NewUpdater(cfg.Feeds, keys, cfg.Server.Hostname, downloader, database, storage)
+		if err != nil {
+			log.WithError(err).Fatal("failed to create updater")
+		}
+
 		for _, _feed := range cfg.Feeds {
 			if err := manager.Update(ctx, _feed); err != nil {
 				log.WithError(err).Errorf("failed to update feed: %s", _feed.URL)
@@ -202,9 +183,14 @@ func main() {
 		return
 	}
 
-	// Queue of feeds to update
-	updates := make(chan *feed.Config, 16)
-	defer close(updates)
+	// The scheduler owns the update manager, the update queue, the cron table
+	// and the config hot-reload loop
+	log.Debug("creating update scheduler")
+	scheduler, err := update.NewScheduler(store, downloader, database, storage)
+	if err != nil {
+		log.WithError(err).Fatal("failed to create scheduler")
+	}
+	defer scheduler.Close()
 
 	group, ctx := errgroup.WithContext(ctx)
 	defer func() {
@@ -214,65 +200,9 @@ func main() {
 		log.Info("gracefully stopped")
 	}()
 
-	// Create Cron
-	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)))
-	m := make(map[string]cron.EntryID)
-
-	// Run updates listener
+	// Run the scheduler: feed updates, cron and config hot-reload
 	group.Go(func() error {
-		for {
-			select {
-			case _feed := <-updates:
-				if err := manager.Update(ctx, _feed); err != nil {
-					log.WithError(err).Errorf("failed to update feed: %s", _feed.URL)
-				} else {
-					log.Infof("next update of %s: %s", _feed.ID, c.Entry(m[_feed.ID]).Next)
-				}
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-	})
-
-	// Run cron scheduler
-	group.Go(func() error {
-		var cronID cron.EntryID
-
-		for _, _feed := range cfg.Feeds {
-			// Track if this feed has an explicit cron schedule
-			hasExplicitCronSchedule := _feed.CronSchedule != ""
-
-			if _feed.CronSchedule == "" {
-				_feed.CronSchedule = fmt.Sprintf("@every %s", _feed.UpdatePeriod.String())
-			}
-			cronFeed := _feed
-			if cronID, err = c.AddFunc(cronFeed.CronSchedule, func() {
-				log.Debugf("adding %q to update queue", cronFeed.ID)
-				updates <- cronFeed
-			}); err != nil {
-				log.WithError(err).Fatalf("can't create cron task for feed: %s", cronFeed.ID)
-			}
-
-			m[cronFeed.ID] = cronID
-			log.Debugf("-> %s (update '%s')", cronFeed.ID, cronFeed.CronSchedule)
-
-			// Only perform initial update if no explicit cron schedule is configured
-			// This prevents unwanted updates when using fixed schedules in Docker deployments
-			if !hasExplicitCronSchedule {
-				updates <- cronFeed
-			}
-		}
-
-		c.Start()
-
-		for {
-			<-ctx.Done()
-
-			log.Info("shutting down cron")
-			c.Stop()
-
-			return ctx.Err()
-		}
+		return scheduler.Run(ctx)
 	})
 
 	if cfg.Storage.Type == "s3" {
