@@ -18,6 +18,10 @@ import (
 // caller last read it (concurrent admin edit or a hand edit on disk).
 var ErrConflict = errors.New("config file was modified concurrently (ETag mismatch)")
 
+// ErrWriteFailed indicates the mutated config passed validation but could not
+// be persisted to disk. Callers should treat this as a server-side error.
+var ErrWriteFailed = errors.New("failed to write config file")
+
 // Store is the single owner of config.toml at runtime. All reads and writes go
 // through it: edits are applied to the raw TOML document via tomledit (which
 // preserves comments and key order, unlike go-toml's Tree serializer),
@@ -123,7 +127,7 @@ func (s *Store) Update(ifMatch string, mutate func(doc *tomledit.Document) error
 	}
 
 	if _, err := fs.WriteFileAtomic(s.path, bytes.NewReader(out), 0644); err != nil {
-		return nil, errors.Wrap(err, "failed to write config file")
+		return nil, errors.Wrapf(ErrWriteFailed, "%v", err)
 	}
 
 	s.current = cfg

@@ -40,6 +40,26 @@ type Config struct {
 	Downloader ytdl.Config `toml:"downloader"`
 	// Global cleanup policy applied to feeds that don't specify their own cleanup policy
 	Cleanup *feed.Cleanup `toml:"cleanup"`
+	// Admin is the internal administrative API configuration
+	Admin Admin `toml:"admin"`
+}
+
+// DefaultAdminPort is the port the admin API listens on unless configured otherwise.
+const DefaultAdminPort = 8095
+
+// Admin is the configuration of the internal administrative API server.
+// Changes to this section require a restart.
+type Admin struct {
+	// Enabled toggles the admin API server (disabled by default)
+	Enabled bool `toml:"enabled"`
+	// Port is the admin server port to listen to (default 8095)
+	Port int `toml:"port"`
+	// BindAddress is a specific IP address to bind to ("*" binds all addresses)
+	BindAddress string `toml:"bind_address"`
+	// Token, when non-empty, requires "Authorization: Bearer <token>" on all
+	// /api endpoints. Can also be set via the PODSYNC_ADMIN_TOKEN environment
+	// variable, which takes precedence.
+	Token string `toml:"token"`
 }
 
 type Log struct {
@@ -175,6 +195,10 @@ func (c *Config) applyDefaults(configPath string) {
 		c.Database.Dir = filepath.Join(filepath.Dir(configPath), "db")
 	}
 
+	if c.Admin.Port == 0 {
+		c.Admin.Port = DefaultAdminPort
+	}
+
 	for _, _feed := range c.Feeds {
 		if _feed.UpdatePeriod == 0 {
 			_feed.UpdatePeriod = model.DefaultUpdatePeriod
@@ -228,6 +252,10 @@ func (c *Config) applyEnv() {
 			keys := strings.Fields(val)
 			c.Tokens[provider] = keys
 		}
+	}
+
+	if val, ok := os.LookupEnv("PODSYNC_ADMIN_TOKEN"); ok {
+		c.Admin.Token = val
 	}
 }
 

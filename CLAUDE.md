@@ -21,9 +21,14 @@ Podsync is a Go-based service that converts YouTube, Vimeo, SoundCloud, and Twit
 - **ytdl/**: YouTube-dl wrapper for media downloading
 
 ### Services (`services/`)
-- **update/**: Feed update orchestration, scheduling, episode filtering via matcher.go
+- **update/**: Feed update orchestration and scheduling (scheduler.go: cron + single-consumer update loop + config hot-reload), episode filtering via matcher.go
 - **web/**: HTTP server for serving podcast feeds, media files, and health checks
+- **admin/**: Internal administrative HTTP API on a separate port (config editing, hot reload); disabled by default
 - **migrate/**: Filename migration tooling for transitioning to custom filename templates
+
+### Configuration Engine (`pkg/config/`)
+- **config.go**: TOML configuration model, loading, defaults, env overrides and validation
+- **store.go**: Runtime owner of config.toml — thread-safe read/mutate/validate/atomic-write with ETag-based concurrency control; publishes new snapshots to a coalescing reload channel consumed by the update scheduler
 
 ### Key Dependencies
 - youtube-dl/yt-dlp for media downloading
@@ -246,6 +251,16 @@ custom_binary = "/path/to/yt-dlp"      # Custom youtube-dl/yt-dlp binary
 keep_last = 50                         # Applied to all feeds unless overridden
 ```
 
+### Admin API
+```toml
+[admin]
+enabled = false                        # Admin API server (disabled by default)
+port = 8095                            # Listen port (default 8095)
+bind_address = "*"                     # IP to bind ("*" for all)
+token = ""                             # If set, require "Authorization: Bearer <token>" on /api
+```
+Environment variable: `PODSYNC_ADMIN_TOKEN` (takes precedence over the config value). Changes to the `[admin]` block itself require a restart.
+
 ### Logging
 ```toml
 [log]
@@ -310,6 +325,25 @@ debug = false
 - `/debug/vars` - Runtime metrics (if `debug_endpoints = true`)
 - `/robots.txt` - Search engine blocking (if `no_index = true`)
 
+## Admin API (services/admin)
+
+A separate internal HTTP server (default port 8095, `admin.enabled = true` required) for managing `config.toml` at runtime. It must never be published to the internet — restrict it via Docker network isolation, a Traefik IP allowlist (see `docker-compose.dev.yml`), and/or the bearer token.
+
+### Endpoints
+- `GET /healthz` - Liveness (unauthenticated)
+- `GET /api/config` - Full config, API tokens redacted to last 4 characters
+- `GET /api/config/{section}` - One of: server, storage, tokens, feeds, downloader, log
+- `PUT /api/config/{section}` - Replace a section (JSON body)
+- `GET /api/feeds` - Feed summaries; `GET/PUT/DELETE /api/feeds/{id}` - single feed CRUD
+- `POST /api/reload` - Re-read config.toml from disk (after hand edits)
+
+### Semantics
+- All edits go through `config.Store`: mutate the TOML document via tomledit (comments and key order preserved), validate via the standard config validation, then write atomically (temp file + rename in the same directory). Invalid payloads return 400 and never touch disk.
+- Optimistic concurrency: GET responses carry an `ETag` header (SHA-256 of the file); send it back via `If-Match` on PUT/DELETE — a mismatch returns 412.
+- Hot reload: changes to `[feeds]` and `[tokens]` are applied live — the store publishes the new config to the update scheduler, which rebuilds the cron table and the update manager between feed updates (active 429 backoffs are carried over). Other sections (`server`, `storage`, `database`, `downloader`, `log`, `admin`) are saved to disk but require a restart (`restart_required: true` in the response).
+- Replacing a section or feed replaces its block wholesale, including comments inside that block; comments elsewhere in the file are preserved.
+- The config file's *directory* (not the file) must be bind-mounted in Docker, because atomic rename replaces the file inode.
+
 ## Storage Behavior
 
 ### Local Storage
@@ -331,7 +365,8 @@ debug = false
 
 ## Error Handling
 
-- HTTP 429 (rate limit): stops the current batch and puts the feed in exponential backoff (15m, 30m, 1h, capped at 2h); updates are skipped until the backoff window expires, and a successful update resets it
+- HTTP 429 (rate limit): stops the current batch and puts the feed in exponential backoff (15m, 30m, 1h, capped at 2h); updates are skipped until the backoff window expires, and a successful update resets it. Backoffs survive config hot-reloads
+- Invalid `cron_schedule`: the feed is left unscheduled with an error logged; the daemon and all other feeds keep running
 - A 429 during the metadata phase does not abort the update: downloads are skipped for that cycle but the XML feed is still rebuilt from the database so the served feed stays intact
 - Download failures: episode status set to `EpisodeError` with a retry counter; retried on subsequent cycles up to 5 attempts, then skipped permanently (deleted/geo-blocked/private videos)
 - API failures: logged, scheduler continues with other feeds
@@ -488,8 +523,12 @@ This project uses golangci-lint with strict formatting rules configured in `.gol
 ## Key File References
 
 - Main entry: `cmd/podsync/main.go`
-- Config loading: `cmd/podsync/config.go`
-- Feed update: `services/update/updater.go` (episode lifecycle, cleanup)
+- Config loading: `pkg/config/config.go`
+- Config store (hot reload, atomic writes): `pkg/config/store.go`
+- Atomic file writes: `pkg/fs/atomic.go`
+- Feed update: `services/update/updater.go` (episode lifecycle, cleanup, rate-limit backoff)
+- Update scheduling and hot reload: `services/update/scheduler.go`
+- Admin API: `services/admin/server.go`, `services/admin/handlers.go`
 - Episode filtering: `services/update/matcher.go`
 - Database: `pkg/db/badger.go`
 - Storage: `pkg/fs/local.go`, `pkg/fs/s3.go`

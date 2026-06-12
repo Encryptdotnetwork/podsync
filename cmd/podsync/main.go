@@ -10,6 +10,7 @@ import (
 
 	"github.com/jessevdk/go-flags"
 	"github.com/mxpv/podsync/pkg/config"
+	"github.com/mxpv/podsync/services/admin"
 	"github.com/mxpv/podsync/services/migrate"
 	"github.com/mxpv/podsync/services/update"
 	"github.com/mxpv/podsync/services/web"
@@ -220,6 +221,32 @@ func main() {
 			return srv.ListenAndServe()
 		}
 	})
+
+	// Run internal admin API server (config management and hot reload)
+	if cfg.Admin.Enabled {
+		adminSrv := admin.New(cfg.Admin, store, func() error {
+			_, err := store.Reload()
+			return err
+		})
+
+		group.Go(func() error {
+			log.Infof("running admin API at %s", adminSrv.Addr)
+			return adminSrv.ListenAndServe()
+		})
+
+		group.Go(func() error {
+			<-ctx.Done()
+
+			ctxShutDown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			log.Info("shutting down admin server")
+			if err := adminSrv.Shutdown(ctxShutDown); err != nil {
+				log.WithError(err).Error("admin server shutdown failed")
+			}
+			return nil
+		})
+	}
 
 	group.Go(func() error {
 		// Shutdown web server
