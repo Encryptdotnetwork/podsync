@@ -457,6 +457,21 @@
             }
         }
 
+        // Rewrite Podsync-generated absolute URLs (feed XML, episode media) to
+        // the origin the dashboard is currently served from. The server bakes
+        // server.hostname into the OPML and RSS, so a dashboard opened via a
+        // different origin (LAN IP vs. reverse-proxy domain) would otherwise
+        // hit mixed-content/CORS blocks on every fetch.
+        function relativizeServerUrl(url) {
+            if (!url) return '';
+            try {
+                const parsed = new URL(url, window.location.origin);
+                return window.location.origin + parsed.pathname + parsed.search;
+            } catch (e) {
+                return url;
+            }
+        }
+
         async function fetchEpisodesFromFeed(feedUrl) {
             try {
                 const response = await fetch(feedUrl);
@@ -522,7 +537,7 @@
                     image: proxyThumbnail(item.querySelector('itunes\\:image, image[itunes]')?.getAttribute('href') ||
                            channel.querySelector('itunes\\:image, image[itunes]')?.getAttribute('href') ||
                            channel.querySelector('image url')?.textContent || ''),
-                    enclosureUrl: item.querySelector('enclosure')?.getAttribute('url') || '',
+                    enclosureUrl: relativizeServerUrl(item.querySelector('enclosure')?.getAttribute('url') || ''),
                     enclosureType: item.querySelector('enclosure')?.getAttribute('type') || '',
                     enclosureLength: item.querySelector('enclosure')?.getAttribute('length') || ''
                 };
@@ -586,11 +601,13 @@
             const feeds = [];
             
             outlines.forEach(outline => {
-                // If this outline has an xmlUrl, it's a feed
+                // If this outline has an xmlUrl, it's a feed. The URL is
+                // rewritten to the current origin so the dashboard works no
+                // matter which hostname/IP it was opened through.
                 if (outline.xmlUrl) {
                     feeds.push({
                         title: outline.title || outline.text || 'Unknown Feed',
-                        xmlUrl: outline.xmlUrl,
+                        xmlUrl: relativizeServerUrl(outline.xmlUrl),
                         htmlUrl: outline.htmlUrl || '',
                         description: outline.description || ''
                     });
