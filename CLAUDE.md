@@ -257,7 +257,7 @@ keep_last = 50                         # Applied to all feeds unless overridden
 enabled = false                        # Admin API server (disabled by default)
 port = 8095                            # Listen port (default 8095)
 bind_address = "*"                     # IP to bind ("*" for all)
-token = ""                             # If set, require "Authorization: Bearer <token>" on /api
+token = ""                             # If set, require "Authorization: Bearer <token>" on /admin
 ```
 Environment variable: `PODSYNC_ADMIN_TOKEN` (takes precedence over the config value). Changes to the `[admin]` block itself require a restart.
 
@@ -330,12 +330,13 @@ debug = false
 A separate internal HTTP server (default port 8095, `admin.enabled = true` required) for managing `config.toml` at runtime. It must never be published to the internet — restrict it via Docker network isolation, a Traefik IP allowlist (see `docker-compose.dev.yml`), and/or the bearer token.
 
 ### Endpoints
+All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy rules can never collide with paths fetched by the public feed server or its web UI.
 - `GET /healthz` - Liveness (unauthenticated)
-- `GET /api/config` - Full config, API tokens redacted to last 4 characters
-- `GET /api/config/{section}` - One of: server, storage, tokens, feeds, downloader, log
-- `PUT /api/config/{section}` - Replace a section (JSON body)
-- `GET /api/feeds` - Feed summaries; `GET/PUT/DELETE /api/feeds/{id}` - single feed CRUD
-- `POST /api/reload` - Re-read config.toml from disk (after hand edits)
+- `GET /admin/config` - Full config, API tokens redacted to last 4 characters
+- `GET /admin/config/{section}` - One of: server, storage, tokens, feeds, downloader, log
+- `PUT /admin/config/{section}` - Replace a section (JSON body)
+- `GET /admin/feeds` - Feed summaries; `GET/PUT/DELETE /admin/feeds/{id}` - single feed CRUD
+- `POST /admin/reload` - Re-read config.toml from disk (after hand edits)
 
 ### Semantics
 - All edits go through `config.Store`: mutate the TOML document via tomledit (comments and key order preserved), validate via the standard config validation, then write atomically (temp file + rename in the same directory). Invalid payloads return 400 and never touch disk.

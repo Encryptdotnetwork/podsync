@@ -22,8 +22,8 @@ type Server struct {
 }
 
 // New creates the admin API server. All configuration reads and edits go
-// through the store; reload is invoked by POST /api/reload to force a re-read
-// of config.toml from disk (e.g. after a hand edit over SSH).
+// through the store; reload is invoked by POST /admin/reload to force a
+// re-read of config.toml from disk (e.g. after a hand edit over SSH).
 func New(cfg config.Admin, store *config.Store, reload func() error) *Server {
 	port := cfg.Port
 	if port == 0 {
@@ -46,14 +46,17 @@ func New(cfg config.Admin, store *config.Store, reload func() error) *Server {
 	// Liveness probe for the admin listener itself, intentionally unauthenticated
 	mux.HandleFunc("GET /healthz", srv.handleHealthz)
 
-	mux.HandleFunc("GET /api/config", srv.requireAuth(srv.handleGetConfig))
-	mux.HandleFunc("GET /api/config/{section}", srv.requireAuth(srv.handleGetSection))
-	mux.HandleFunc("PUT /api/config/{section}", srv.requireAuth(srv.handlePutSection))
-	mux.HandleFunc("GET /api/feeds", srv.requireAuth(srv.handleListFeeds))
-	mux.HandleFunc("GET /api/feeds/{id}", srv.requireAuth(srv.handleGetFeed))
-	mux.HandleFunc("PUT /api/feeds/{id}", srv.requireAuth(srv.handlePutFeed))
-	mux.HandleFunc("DELETE /api/feeds/{id}", srv.requireAuth(srv.handleDeleteFeed))
-	mux.HandleFunc("POST /api/reload", srv.requireAuth(srv.handleReload))
+	// Management routes live under /admin: the public web UI fetches relative
+	// paths on the feed server (podsync.opml, feed XML, /thumbnail), and using a
+	// distinct prefix keeps host-level reverse proxy rules collision-free.
+	mux.HandleFunc("GET /admin/config", srv.requireAuth(srv.handleGetConfig))
+	mux.HandleFunc("GET /admin/config/{section}", srv.requireAuth(srv.handleGetSection))
+	mux.HandleFunc("PUT /admin/config/{section}", srv.requireAuth(srv.handlePutSection))
+	mux.HandleFunc("GET /admin/feeds", srv.requireAuth(srv.handleListFeeds))
+	mux.HandleFunc("GET /admin/feeds/{id}", srv.requireAuth(srv.handleGetFeed))
+	mux.HandleFunc("PUT /admin/feeds/{id}", srv.requireAuth(srv.handlePutFeed))
+	mux.HandleFunc("DELETE /admin/feeds/{id}", srv.requireAuth(srv.handleDeleteFeed))
+	mux.HandleFunc("POST /admin/reload", srv.requireAuth(srv.handleReload))
 
 	srv.Addr = fmt.Sprintf("%s:%d", bindAddress, port)
 	srv.Handler = mux

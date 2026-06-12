@@ -57,7 +57,7 @@ type Admin struct {
 	// BindAddress is a specific IP address to bind to ("*" binds all addresses)
 	BindAddress string `toml:"bind_address"`
 	// Token, when non-empty, requires "Authorization: Bearer <token>" on all
-	// /api endpoints. Can also be set via the PODSYNC_ADMIN_TOKEN environment
+	// /admin endpoints. Can also be set via the PODSYNC_ADMIN_TOKEN environment
 	// variable, which takes precedence.
 	Token string `toml:"token"`
 }

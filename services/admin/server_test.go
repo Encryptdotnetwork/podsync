@@ -83,15 +83,15 @@ func TestAdminAuth(t *testing.T) {
 	env := setupServer(t, "secret-token")
 
 	// No credentials
-	rec := env.do(t, http.MethodGet, "/api/config", "", nil)
+	rec := env.do(t, http.MethodGet, "/admin/config", "", nil)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	// Wrong token
-	rec = env.do(t, http.MethodGet, "/api/config", "", map[string]string{"Authorization": "Bearer wrong"})
+	rec = env.do(t, http.MethodGet, "/admin/config", "", map[string]string{"Authorization": "Bearer wrong"})
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
 	// Correct token
-	rec = env.do(t, http.MethodGet, "/api/config", "", map[string]string{"Authorization": "Bearer secret-token"})
+	rec = env.do(t, http.MethodGet, "/admin/config", "", map[string]string{"Authorization": "Bearer secret-token"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	// healthz is intentionally unauthenticated
@@ -102,7 +102,7 @@ func TestAdminAuth(t *testing.T) {
 func TestAdminGetConfigRedactsTokens(t *testing.T) {
 	env := setupServer(t, "")
 
-	rec := env.do(t, http.MethodGet, "/api/config", "", nil)
+	rec := env.do(t, http.MethodGet, "/admin/config", "", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	body := rec.Body.String()
@@ -115,23 +115,23 @@ func TestAdminGetConfigRedactsTokens(t *testing.T) {
 func TestAdminGetSection(t *testing.T) {
 	env := setupServer(t, "")
 
-	rec := env.do(t, http.MethodGet, "/api/config/server", "", nil)
+	rec := env.do(t, http.MethodGet, "/admin/config/server", "", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"Port":8080`)
 
-	rec = env.do(t, http.MethodGet, "/api/config/tokens", "", nil)
+	rec = env.do(t, http.MethodGet, "/admin/config/tokens", "", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "****1234")
 	assert.NotContains(t, rec.Body.String(), "youtube_key_1234")
 
-	rec = env.do(t, http.MethodGet, "/api/config/bogus", "", nil)
+	rec = env.do(t, http.MethodGet, "/admin/config/bogus", "", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestAdminPutSection(t *testing.T) {
 	env := setupServer(t, "")
 
-	rec := env.do(t, http.MethodPut, "/api/config/tokens", `{"youtube": "replacement_key_9999"}`, nil)
+	rec := env.do(t, http.MethodPut, "/admin/config/tokens", `{"youtube": "replacement_key_9999"}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `"applied":true`)
 
@@ -151,7 +151,7 @@ func TestAdminPutSection(t *testing.T) {
 func TestAdminPutSectionRestartRequired(t *testing.T) {
 	env := setupServer(t, "")
 
-	rec := env.do(t, http.MethodPut, "/api/config/log", `{"debug": true}`, nil)
+	rec := env.do(t, http.MethodPut, "/admin/config/log", `{"debug": true}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `"applied":false`)
 	assert.Contains(t, rec.Body.String(), `"restart_required":true`)
@@ -160,12 +160,12 @@ func TestAdminPutSectionRestartRequired(t *testing.T) {
 func TestAdminPutSectionETagConflict(t *testing.T) {
 	env := setupServer(t, "")
 
-	rec := env.do(t, http.MethodPut, "/api/config/tokens", `{"youtube": "k"}`,
+	rec := env.do(t, http.MethodPut, "/admin/config/tokens", `{"youtube": "k"}`,
 		map[string]string{"If-Match": `"0000000000000000000000000000000000000000000000000000000000000000"`})
 	assert.Equal(t, http.StatusPreconditionFailed, rec.Code)
 
 	// With the current ETag the same request succeeds
-	rec = env.do(t, http.MethodPut, "/api/config/tokens", `{"youtube": "k"}`,
+	rec = env.do(t, http.MethodPut, "/admin/config/tokens", `{"youtube": "k"}`,
 		map[string]string{"If-Match": env.store.ETag()})
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
@@ -176,7 +176,7 @@ func TestAdminPutSectionValidationFailure(t *testing.T) {
 	before, err := os.ReadFile(env.path)
 	require.NoError(t, err)
 
-	rec := env.do(t, http.MethodPut, "/api/config/storage", `{"type": "bogus"}`, nil)
+	rec := env.do(t, http.MethodPut, "/admin/config/storage", `{"type": "bogus"}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "validation failed")
 
@@ -190,7 +190,7 @@ func TestAdminFeedCRUD(t *testing.T) {
 	env := setupServer(t, "")
 
 	// Create
-	rec := env.do(t, http.MethodPut, "/api/feeds/NEW",
+	rec := env.do(t, http.MethodPut, "/admin/feeds/NEW",
 		`{"url": "https://youtube.com/channel/new", "page_size": 25, "format": "audio"}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -200,34 +200,34 @@ func TestAdminFeedCRUD(t *testing.T) {
 	assert.EqualValues(t, 25, newFeed.PageSize, "json.Number must round-trip as TOML integer")
 
 	// Read single + list
-	rec = env.do(t, http.MethodGet, "/api/feeds/NEW", "", nil)
+	rec = env.do(t, http.MethodGet, "/admin/feeds/NEW", "", nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
 
-	rec = env.do(t, http.MethodGet, "/api/feeds", "", nil)
+	rec = env.do(t, http.MethodGet, "/admin/feeds", "", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"id":"A"`)
 	assert.Contains(t, rec.Body.String(), `"id":"NEW"`)
 
 	// Replace: the old block (page_size) is fully replaced, not merged
-	rec = env.do(t, http.MethodPut, "/api/feeds/NEW", `{"url": "https://youtube.com/channel/new2"}`, nil)
+	rec = env.do(t, http.MethodPut, "/admin/feeds/NEW", `{"url": "https://youtube.com/channel/new2"}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	replaced := env.store.Get().Feeds["NEW"]
 	assert.Equal(t, "https://youtube.com/channel/new2", replaced.URL)
 
 	// Delete
-	rec = env.do(t, http.MethodDelete, "/api/feeds/NEW", "", nil)
+	rec = env.do(t, http.MethodDelete, "/admin/feeds/NEW", "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.NotContains(t, env.store.Get().Feeds, "NEW")
 
-	rec = env.do(t, http.MethodGet, "/api/feeds/NEW", "", nil)
+	rec = env.do(t, http.MethodGet, "/admin/feeds/NEW", "", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
 	// Deleting an unknown feed is a 404
-	rec = env.do(t, http.MethodDelete, "/api/feeds/NOPE", "", nil)
+	rec = env.do(t, http.MethodDelete, "/admin/feeds/NOPE", "", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
 	// Deleting the last feed fails validation and leaves the config intact
-	rec = env.do(t, http.MethodDelete, "/api/feeds/A", "", nil)
+	rec = env.do(t, http.MethodDelete, "/admin/feeds/A", "", nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, env.store.Get().Feeds, "A")
 }
@@ -236,7 +236,7 @@ func TestAdminPutFeedWithNestedTables(t *testing.T) {
 	env := setupServer(t, "")
 
 	// Nested objects become [feeds.X.filters] style sub-tables
-	rec := env.do(t, http.MethodPut, "/api/feeds/NESTED",
+	rec := env.do(t, http.MethodPut, "/admin/feeds/NESTED",
 		`{"url": "https://youtube.com/channel/n", "filters": {"not_title": "(?i)live"}}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -245,7 +245,7 @@ func TestAdminPutFeedWithNestedTables(t *testing.T) {
 	assert.Equal(t, "(?i)live", nested.Filters.NotTitle)
 
 	// Replacing the feed removes the nested table too (no orphaned sub-tables)
-	rec = env.do(t, http.MethodPut, "/api/feeds/NESTED", `{"url": "https://youtube.com/channel/n"}`, nil)
+	rec = env.do(t, http.MethodPut, "/admin/feeds/NESTED", `{"url": "https://youtube.com/channel/n"}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Empty(t, env.store.Get().Feeds["NESTED"].Filters.NotTitle)
 
@@ -257,7 +257,7 @@ func TestAdminPutFeedWithNestedTables(t *testing.T) {
 func TestAdminReload(t *testing.T) {
 	env := setupServer(t, "")
 
-	rec := env.do(t, http.MethodPost, "/api/reload", "", nil)
+	rec := env.do(t, http.MethodPost, "/admin/reload", "", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.True(t, *env.reloaded, "reload trigger must be invoked")
 }
