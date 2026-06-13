@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Podsync Admin</title>
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style>
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    .tab-active { border-color: #34d399; color: #34d399; }
+</style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+
+<div class="max-w-6xl mx-auto p-4 md:p-6 space-y-5">
+
+    <!-- ====== Header / Connection ====== -->
+    <header class="bg-slate-900 p-5 rounded-xl border border-slate-800 shadow-lg">
+        <div class="flex flex-col lg:flex-row lg:items-center gap-4">
+            <div class="flex-1">
+                <h1 class="text-2xl font-bold tracking-tight flex items-center gap-2">
+                    <span class="text-emerald-400">⏵</span> Podsync Admin
+                    <span id="connBadge" class="text-xs font-medium px-2 py-0.5 rounded-full bg-slate-700 text-slate-300">disconnected</span>
+                </h1>
+                <p class="text-xs text-slate-500 mt-1 font-mono" id="etagLine">ETag: —</p>
+            </div>
+            <div class="flex flex-col sm:flex-row gap-2">
+                <input id="apiBase" placeholder="https://podsyncdev.example.com"
+                       class="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono focus:border-emerald-500 focus:outline-none w-full sm:w-72">
+                <div class="flex items-center gap-2 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2">
+                    <input type="password" id="apiToken" placeholder="Bearer token"
+                           class="bg-transparent text-sm font-mono text-emerald-300 focus:outline-none flex-1 sm:w-44">
+                    <button onclick="toggleToken()" class="text-xs text-slate-500 hover:text-slate-300">👁</button>
+                </div>
+                <button onclick="connect()" class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors">Connect</button>
+            </div>
+        </div>
+        <!-- Stats strip -->
+        <div id="statsStrip" class="hidden mt-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div class="bg-slate-950 rounded-lg p-3 border border-slate-800"><div class="text-xs text-slate-500 uppercase">Feeds</div><div id="statFeeds" class="font-mono text-lg text-emerald-400">—</div></div>
+            <div class="bg-slate-950 rounded-lg p-3 border border-slate-800"><div class="text-xs text-slate-500 uppercase">Hostname</div><div id="statHost" class="font-mono text-xs mt-1 truncate text-slate-300">—</div></div>
+            <div class="bg-slate-950 rounded-lg p-3 border border-slate-800"><div class="text-xs text-slate-500 uppercase">Storage</div><div id="statStorage" class="font-mono text-lg text-slate-300">—</div></div>
+            <div class="bg-slate-950 rounded-lg p-3 border border-slate-800 flex items-center justify-between">
+                <div><div class="text-xs text-slate-500 uppercase">Config</div><div class="text-xs text-slate-400 mt-1">re-read from disk</div></div>
+                <button onclick="reloadConfig()" class="bg-amber-600/20 hover:bg-amber-600 border border-amber-500/30 text-amber-300 hover:text-white text-xs font-semibold px-3 py-1.5 rounded-md transition-colors">Reload</button>
+            </div>
+        </div>
+        <div id="restartBanner" class="hidden mt-3 bg-amber-950/60 border border-amber-700/50 text-amber-300 text-sm rounded-lg px-4 py-2">
+            ⚠ A saved change requires a container restart to take effect.
+        </div>
+    </header>
+
+    <!-- ====== Tabs ====== -->
+    <nav class="flex gap-1 border-b border-slate-800 text-sm font-medium">
+        <button id="tabBtn-feeds"  onclick="showTab('feeds')"  class="tab-active px-4 py-2 border-b-2 border-transparent hover:text-emerald-300">Feeds</button>
+        <button id="tabBtn-config" onclick="showTab('config')" class="px-4 py-2 border-b-2 border-transparent text-slate-400 hover:text-emerald-300">Config Sections</button>
+    </nav>
+
+    <!-- ====== Feeds tab ====== -->
+    <section id="tab-feeds" class="space-y-4">
+        <div class="bg-slate-900 rounded-xl border border-slate-800 shadow-lg overflow-hidden">
+            <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+                <h2 class="font-semibold text-slate-200">Active Feeds</h2>
+                <div class="flex gap-2">
+                    <button onclick="loadAll()" class="text-xs bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-md">↻ Refresh</button>
+                    <button onclick="openFeedModal()" class="text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-semibold px-3 py-1.5 rounded-md">+ Add Feed</button>
+                </div>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left text-sm">
+                    <thead><tr class="bg-slate-950/60 text-xs text-slate-500 uppercase tracking-wider border-b border-slate-800">
+                        <th class="p-3">ID</th><th class="p-3">Source</th><th class="p-3">Format</th><th class="p-3">Schedule</th><th class="p-3">Keep</th><th class="p-3 text-right">Actions</th>
+                    </tr></thead>
+                    <tbody id="feedRows" class="divide-y divide-slate-800/60">
+                        <tr><td colspan="6" class="p-8 text-center text-slate-500 italic">Connect to load feeds.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- ====== Config tab ====== -->
+    <section id="tab-config" class="hidden space-y-4">
+        <div class="bg-slate-900 rounded-xl border border-slate-800 shadow-lg p-5 space-y-4">
+            <div class="flex flex-wrap items-center gap-2" id="sectionPills"></div>
+            <p class="text-xs text-slate-500">
+                Edits are JSON with <span class="font-mono text-slate-400">snake_case</span> TOML keys (translated automatically from the server's response).
+                Saving replaces the whole section; empty/zero values are stripped. <span class="text-amber-400">Tokens shown here are redacted and cannot be saved back.</span>
+            </p>
+            <textarea id="sectionEditor" spellcheck="false" rows="18"
+                class="w-full bg-slate-950 border border-slate-800 rounded-lg p-4 font-mono text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"></textarea>
+            <div class="flex items-center justify-between">
+                <span id="sectionStatus" class="text-xs text-slate-500"></span>
+                <button onclick="saveSection()" class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold px-4 py-2 rounded-lg">Save Section</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- ====== Log console ====== -->
+    <footer class="bg-black/60 rounded-xl border border-slate-800 font-mono text-xs">
+        <div class="flex justify-between items-center px-4 py-2 border-b border-slate-800 text-slate-500">
+            <span>LOG</span><button onclick="logEl().textContent=''" class="hover:text-slate-300">Clear</button>
+        </div>
+        <pre id="log" class="px-4 py-3 max-h-44 overflow-y-auto whitespace-pre-wrap text-slate-300"></pre>
+    </footer>
+</div>
+
+<!-- ====== Feed modal ====== -->
+<div id="feedModal" class="hidden fixed inset-0 bg-black/70 z-50 overflow-y-auto p-4">
+    <div class="max-w-2xl mx-auto my-8 bg-slate-900 rounded-xl border border-slate-700 shadow-2xl">
+        <div class="p-4 border-b border-slate-800 flex justify-between items-center">
+            <h3 id="feedModalTitle" class="font-semibold">Add Feed</h3>
+            <button onclick="closeFeedModal()" class="text-slate-500 hover:text-slate-200 text-lg">✕</button>
+        </div>
+        <div class="p-5 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+            <div><label class="text-xs text-slate-400 uppercase">Feed ID *</label>
+                <input id="f_id" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-mono focus:border-emerald-500 focus:outline-none"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Source URL *</label>
+                <input id="f_url" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2 focus:border-emerald-500 focus:outline-none"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Format</label>
+                <select id="f_format" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2"><option value="video">video</option><option value="audio">audio</option></select></div>
+            <div><label class="text-xs text-slate-400 uppercase">Quality</label>
+                <select id="f_quality" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2"><option value="high">high</option><option value="low">low</option></select></div>
+            <div><label class="text-xs text-slate-400 uppercase">Max Height</label>
+                <input id="f_max_height" type="number" placeholder="e.g. 720" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Page Size</label>
+                <input id="f_page_size" type="number" placeholder="50" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Update Period</label>
+                <input id="f_update_period" placeholder='e.g. "1h" (ignored if cron set)' class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-mono"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Cron Schedule</label>
+                <input id="f_cron" placeholder="e.g. 0 */6 * * *" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-mono"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Keep Last (cleanup)</label>
+                <input id="f_keep_last" type="number" placeholder="e.g. 5" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Language (custom.lang)</label>
+                <input id="f_lang" placeholder="en-US" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Filter: title must match</label>
+                <input id="f_filter_title" placeholder="(?i)regex" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-mono"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Filter: exclude title</label>
+                <input id="f_filter_not_title" placeholder="(?i)(live|q&a)" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2 font-mono"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Min Duration (s)</label>
+                <input id="f_min_duration" type="number" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2"></div>
+            <div><label class="text-xs text-slate-400 uppercase">Max Duration (s)</label>
+                <input id="f_max_duration" type="number" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg p-2"></div>
+            <div class="flex items-center gap-6 md:col-span-2">
+                <label class="flex items-center gap-2 text-sm"><input id="f_opml" type="checkbox" class="accent-emerald-500" checked> Include in OPML</label>
+                <label class="flex items-center gap-2 text-sm"><input id="f_private" type="checkbox" class="accent-emerald-500" checked> Private feed</label>
+            </div>
+            <div class="md:col-span-2">
+                <label class="text-xs text-slate-400 uppercase flex justify-between">
+                    <span>Payload preview (PUT /admin/feeds/{id})</span>
+                    <label class="normal-case flex items-center gap-1 text-slate-500"><input id="f_advanced" type="checkbox" class="accent-emerald-500" onchange="syncPayloadPreview()"> edit raw JSON</label>
+                </label>
+                <textarea id="f_json" rows="7" spellcheck="false" readonly
+                    class="mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg p-3 font-mono text-xs text-slate-400"></textarea>
+            </div>
+        </div>
+        <div class="p-4 border-t border-slate-800 flex justify-between items-center">
+            <span class="text-xs text-slate-500">Empty fields are omitted (PUT replaces the whole feed block).</span>
+            <button onclick="saveFeed()" class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold px-5 py-2 rounded-lg">Save Feed</button>
+        </div>
+    </div>
+</div>
+
+<script>
+"use strict";
+
+/* ============ state & helpers ============ */
+const state = { etag: null, config: null, editingId: null, feedExtra: {} };
+const $  = id => document.getElementById(id);
+const logEl = () => $('log');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function log(msg, isError) {
+    const t = new Date().toLocaleTimeString();
+    logEl().textContent = `[${isError ? 'ERR ' : 'INFO'} ${t}] ${msg}\n` + logEl().textContent;
+    if (isError) console.error(msg);
+}
+
+function toggleToken() { const i = $('apiToken'); i.type = i.type === 'password' ? 'text' : 'password'; }
+
+/* ============ API client (ETag-aware) ============ */
+async function api(method, path, body) {
+    const headers = {};
+    const token = $('apiToken').value.trim();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    // Optimistic concurrency: always send the last ETag we saw on writes
+    if ((method === 'PUT' || method === 'DELETE') && state.etag) headers['If-Match'] = state.etag;
+
+    const base = $('apiBase').value.trim().replace(/\/+$/, '');
+    const res = await fetch(base + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+
+    const headerETag = res.headers.get('ETag');
+    if (headerETag) state.etag = headerETag;
+
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* empty body */ }
+    if (data && data.etag) state.etag = data.etag;
+    $('etagLine').textContent = 'ETag: ' + (state.etag ? state.etag.slice(0, 16) + '…' : '—');
+
+    if (!res.ok) {
+        const msg = (data && data.error) || ('HTTP ' + res.status);
+        const err = new Error(msg);
+        err.status = res.status;
+        throw err;
+    }
+    if (data && data.restart_required) $('restartBanner').classList.remove('hidden');
+    return data;
+}
+
+// Shared error handler: 412 means someone else edited the config
+async function handleApiError(err, context) {
+    if (err.status === 412) {
+        log(`${context}: config changed elsewhere (ETag conflict). State refreshed — review and retry.`, true);
+        await loadAll();
+    } else {
+        log(`${context}: ${err.message}`, true);
+    }
+}
+
+/* ============ Go field names -> TOML keys ============ */
+const FEED_MAP = {
+    ID: null, PostEpisodeDownload: null, OnEpisodeDownloadError: null,
+    URL: 'url', PageSize: 'page_size', UpdatePeriod: 'update_period', CronSchedule: 'cron_schedule',
+    Quality: 'quality', MaxHeight: 'max_height', Format: 'format',
+    YouTubeDLArgs: 'youtube_dl_args', OPML: 'opml', PrivateFeed: 'private_feed',
+    PlaylistSort: 'playlist_sort', FilenameTemplate: 'filename_template',
+    CustomFormat: { __key: 'custom_format', YouTubeDLFormat: 'youtube_dl_format', Extension: 'extension' },
+    Filters: { __key: 'filters', Title: 'title', NotTitle: 'not_title', Description: 'description',
+               NotDescription: 'not_description', MinDuration: 'min_duration', MaxDuration: 'max_duration',
+               MaxAge: 'max_age', MinAge: 'min_age' },
+    Clean: { __key: 'clean', KeepLast: 'keep_last' },
+    Custom: { __key: 'custom', CoverArt: 'cover_art', CoverArtQuality: 'cover_art_quality', Category: 'category',
+              Subcategories: 'subcategories', Explicit: 'explicit', Language: 'lang', Author: 'author',
+              Title: 'title', Description: 'description', OwnerName: 'ownerName', OwnerEmail: 'ownerEmail', Link: 'link' },
+};
+const KEYMAPS = {
+    server: { Hostname: 'hostname', Port: 'port', BindAddress: 'bind_address', TLS: 'tls',
+              CertificatePath: 'certificate_path', KeyFilePath: 'key_file_path', Path: 'path', DataDir: 'data_dir',
+              WebUIEnabled: 'web_ui', DebugEndpoints: 'debug_endpoints', NoIndex: 'no_index', NoListing: 'no_listing' },
+    storage: { Type: 'type', Local: { __key: 'local', DataDir: 'data_dir' },
+               S3: { __key: 's3', EndpointURL: 'endpoint_url', Region: 'region', Bucket: 'bucket', Prefix: 'prefix' } },
+    log: { Filename: 'filename', MaxSize: 'max_size', MaxBackups: 'max_backups', MaxAge: 'max_age', Compress: 'compress', Debug: 'debug' },
+    downloader: { SelfUpdate: 'self_update', Timeout: 'timeout', CustomBinary: 'custom_binary' },
+    tokens: {},        // provider keys are already lowercase
+    feeds: '__feeds',  // special-cased: map of feed.Config
+};
+
+function goToToml(obj, map) {
+    if (obj == null || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+        const m = map ? map[k] : undefined;
+        if (m === null) continue;                       // explicitly dropped
+        if (m === undefined) { out[k] = v; continue; }  // pass-through (e.g. token provider keys)
+        if (typeof m === 'object') { out[m.__key] = goToToml(v, m); continue; }
+        if (k === 'UpdatePeriod' && typeof v === 'number') { out[m] = nsToDuration(v); continue; }
+        out[m] = v;
+    }
+    return out;
+}
+
+// Strip zero values so the written TOML stays minimal (absent key == default)
+function prune(v) {
+    if (Array.isArray(v)) { const a = v.map(prune).filter(x => x !== undefined); return a.length ? a : undefined; }
+    if (v && typeof v === 'object') {
+        const o = {};
+        for (const [k, val] of Object.entries(v)) { const p = prune(val); if (p !== undefined) o[k] = p; }
+        return Object.keys(o).length ? o : undefined;
+    }
+    return (v === '' || v === 0 || v === false || v == null) ? undefined : v;
+}
+
+function nsToDuration(ns) {
+    if (!ns) return '';
+    let s = Math.round(ns / 1e9);
+    const h = Math.floor(s / 3600); s %= 3600;
+    const m = Math.floor(s / 60); s %= 60;
+    return ((h ? h + 'h' : '') + (m ? m + 'm' : '') + (s ? s + 's' : '')) || '0s';
+}
+
+function feedToToml(goFeed) { return prune(goToToml(goFeed, FEED_MAP)) || {}; }
+
+/* ============ connect & dashboard ============ */
+async function connect() {
+    localStorage.setItem('podsync_base', $('apiBase').value.trim());
+    sessionStorage.setItem('podsync_token', $('apiToken').value);
+    try {
+        await api('GET', '/healthz');
+        $('connBadge').textContent = 'connected';
+        $('connBadge').className = 'text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-900 text-emerald-300';
+        log('Connected to ' + $('apiBase').value.trim());
+        await loadAll();
+    } catch (err) {
+        $('connBadge').textContent = 'failed';
+        $('connBadge').className = 'text-xs font-medium px-2 py-0.5 rounded-full bg-rose-900 text-rose-300';
+        log('Connection failed: ' + err.message, true);
+    }
+}
+
+async function loadAll() {
+    try {
+        state.config = await api('GET', '/admin/config');
+        const feeds = state.config.feeds || {};
+        $('statsStrip').classList.remove('hidden');
+        $('statFeeds').textContent = Object.keys(feeds).length;
+        $('statHost').textContent = (state.config.server && state.config.server.Hostname) || '—';
+        $('statStorage').textContent = (state.config.storage && state.config.storage.Type) || '—';
+        renderFeeds(feeds);
+        log(`Loaded config: ${Object.keys(feeds).length} feed(s).`);
+    } catch (err) { await handleApiError(err, 'Load config'); }
+}
+
+async function reloadConfig() {
+    try {
+        await api('POST', '/admin/reload');
+        log('Config re-read from disk; scheduler will apply it between updates.');
+        await loadAll();
+    } catch (err) { await handleApiError(err, 'Reload'); }
+}
+
+/* ============ feeds table ============ */
+function renderFeeds(feeds) {
+    const ids = Object.keys(feeds).sort();
+    if (!ids.length) {
+        $('feedRows').innerHTML = '<tr><td colspan="6" class="p-8 text-center text-slate-500">No feeds configured.</td></tr>';
+        return;
+    }
+    $('feedRows').innerHTML = ids.map(id => {
+        const f = feeds[id];
+        const schedule = f.CronSchedule ? `cron: ${esc(f.CronSchedule)}` : `every ${esc(nsToDuration(f.UpdatePeriod) || '6h')}`;
+        const keep = f.Clean && f.Clean.KeepLast ? f.Clean.KeepLast : '∞';
+        return `<tr class="hover:bg-slate-800/30">
+            <td class="p-3 font-mono text-emerald-400">${esc(id)}</td>
+            <td class="p-3 max-w-xs truncate text-slate-300" title="${esc(f.URL)}">${esc(f.URL)}</td>
+            <td class="p-3"><span class="bg-slate-800 text-slate-300 text-xs px-2 py-0.5 rounded">${esc(f.Format)} / ${esc(f.Quality)}</span></td>
+            <td class="p-3 font-mono text-xs text-slate-400">${schedule}</td>
+            <td class="p-3 font-mono text-xs text-slate-400">${esc(keep)}</td>
+            <td class="p-3 text-right whitespace-nowrap">
+                <button onclick="openFeedModal('${esc(id)}')" class="bg-sky-600/20 hover:bg-sky-600 border border-sky-500/30 text-sky-300 hover:text-white text-xs px-3 py-1 rounded mr-1">Edit</button>
+                <button onclick="deleteFeed('${esc(id)}')" class="bg-rose-600/20 hover:bg-rose-600 border border-rose-500/30 text-rose-300 hover:text-white text-xs px-3 py-1 rounded">Delete</button>
+            </td></tr>`;
+    }).join('');
+}
+
+/* ============ feed modal ============ */
+const FORM_FIELDS = ['f_id','f_url','f_format','f_quality','f_max_height','f_page_size','f_update_period','f_cron','f_keep_last','f_lang','f_filter_title','f_filter_not_title','f_min_duration','f_max_duration'];
+
+function openFeedModal(id) {
+    state.editingId = id || null;
+    state.feedExtra = {};
+    FORM_FIELDS.forEach(f => $(f).value = '');
+    $('f_opml').checked = true; $('f_private').checked = true;
+    $('f_format').value = 'video'; $('f_quality').value = 'low';
+    $('f_advanced').checked = false;
+    $('feedModalTitle').textContent = id ? `Edit Feed: ${id}` : 'Add Feed';
+    $('f_id').value = id || '';
+    $('f_id').disabled = !!id;
+
+    if (id && state.config && state.config.feeds && state.config.feeds[id]) {
+        const t = feedToToml(state.config.feeds[id]); // TOML-keyed object
+        $('f_url').value = t.url || '';
+        $('f_format').value = t.format || 'video';
+        $('f_quality').value = t.quality || 'high';
+        $('f_max_height').value = t.max_height || '';
+        $('f_page_size').value = t.page_size || '';
+        $('f_update_period').value = t.update_period || '';
+        $('f_cron').value = t.cron_schedule || '';
+        $('f_keep_last').value = (t.clean && t.clean.keep_last) || '';
+        $('f_lang').value = (t.custom && t.custom.lang) || '';
+        const fl = t.filters || {};
+        $('f_filter_title').value = fl.title || '';
+        $('f_filter_not_title').value = fl.not_title || '';
+        $('f_min_duration').value = fl.min_duration || '';
+        $('f_max_duration').value = fl.max_duration || '';
+        $('f_opml').checked = !!t.opml;
+        $('f_private').checked = !!t.private_feed;
+        // Preserve everything the quick fields don't cover (custom format,
+        // hooks aren't returned, playlist_sort, templates, extra custom keys...)
+        const extra = { ...t };
+        ['url','format','quality','max_height','page_size','update_period','cron_schedule','clean','filters','opml','private_feed'].forEach(k => delete extra[k]);
+        if (extra.custom) { extra.custom = { ...extra.custom }; delete extra.custom.lang; if (!Object.keys(extra.custom).length) delete extra.custom; }
+        state.feedExtra = extra;
+    }
+    syncPayloadPreview();
+    FORM_FIELDS.concat(['f_opml','f_private']).forEach(f => { $(f).oninput = syncPayloadPreview; });
+    $('feedModal').classList.remove('hidden');
+}
+function closeFeedModal() { $('feedModal').classList.add('hidden'); }
+
+function buildFeedPayload() {
+    const num = v => { const n = parseInt(v, 10); return isNaN(n) ? undefined : n; };
+    const p = JSON.parse(JSON.stringify(state.feedExtra || {}));
+    p.url = $('f_url').value.trim();
+    p.format = $('f_format').value;
+    p.quality = $('f_quality').value;
+    p.max_height = num($('f_max_height').value);
+    p.page_size = num($('f_page_size').value);
+    if ($('f_cron').value.trim()) { p.cron_schedule = $('f_cron').value.trim(); delete p.update_period; }
+    else if ($('f_update_period').value.trim()) { p.update_period = $('f_update_period').value.trim(); delete p.cron_schedule; }
+    const keep = num($('f_keep_last').value);
+    if (keep) p.clean = { keep_last: keep };
+    const lang = $('f_lang').value.trim();
+    if (lang) p.custom = { ...(p.custom || {}), lang };
+    const filters = prune({
+        title: $('f_filter_title').value.trim(),
+        not_title: $('f_filter_not_title').value.trim(),
+        min_duration: num($('f_min_duration').value),
+        max_duration: num($('f_max_duration').value),
+        ...(p.filters || {}),
+    });
+    if (filters) p.filters = filters; else delete p.filters;
+    if ($('f_opml').checked) p.opml = true; else delete p.opml;
+    if ($('f_private').checked) p.private_feed = true; else delete p.private_feed;
+    return prune(p) || {};
+}
+
+function syncPayloadPreview() {
+    const adv = $('f_advanced').checked;
+    $('f_json').readOnly = !adv;
+    $('f_json').classList.toggle('text-slate-400', !adv);
+    $('f_json').classList.toggle('text-emerald-200', adv);
+    if (!adv) $('f_json').value = JSON.stringify(buildFeedPayload(), null, 2);
+}
+
+async function saveFeed() {
+    const id = $('f_id').value.trim();
+    if (!id) { log('Feed ID is required.', true); return; }
+    let payload;
+    try {
+        payload = $('f_advanced').checked ? JSON.parse($('f_json').value) : buildFeedPayload();
+    } catch (e) { log('Invalid JSON payload: ' + e.message, true); return; }
+    if (!payload.url) { log('Source URL is required.', true); return; }
+    try {
+        await api('PUT', '/admin/feeds/' + encodeURIComponent(id), payload);
+        log(`Feed "${id}" saved — applied live by the scheduler.`);
+        closeFeedModal();
+        await loadAll();
+    } catch (err) { await handleApiError(err, `Save feed "${id}"`); }
+}
+
+async function deleteFeed(id) {
+    if (!confirm(`Delete feed "${id}"?\n\nThis removes its config block (downloaded files stay on disk).`)) return;
+    try {
+        await api('DELETE', '/admin/feeds/' + encodeURIComponent(id));
+        log(`Feed "${id}" deleted.`);
+        await loadAll();
+    } catch (err) { await handleApiError(err, `Delete feed "${id}"`); }
+}
+
+/* ============ config sections tab ============ */
+const SECTIONS = ['server', 'storage', 'tokens', 'feeds', 'downloader', 'log'];
+let activeSection = 'server';
+
+function renderSectionPills() {
+    $('sectionPills').innerHTML = SECTIONS.map(s =>
+        `<button onclick="selectSection('${s}')" id="pill-${s}"
+            class="text-xs font-mono px-3 py-1.5 rounded-md border ${s === activeSection ? 'bg-emerald-900/60 border-emerald-600 text-emerald-300' : 'bg-slate-950 border-slate-700 text-slate-400 hover:text-slate-200'}">[${s}]</button>`
+    ).join('');
+}
+
+async function selectSection(s) {
+    activeSection = s;
+    renderSectionPills();
+    try {
+        const data = await api('GET', '/admin/config/' + s);
+        let view;
+        if (s === 'feeds') {
+            view = {};
+            for (const [id, f] of Object.entries(data || {})) view[id] = feedToToml(f);
+        } else if (s === 'tokens') {
+            view = data; // already lowercase provider keys (values redacted)
+        } else {
+            view = prune(goToToml(data, KEYMAPS[s])) || {};
+        }
+        $('sectionEditor').value = JSON.stringify(view, null, 2);
+        $('sectionStatus').textContent = s === 'tokens'
+            ? 'read-only: values are redacted'
+            : (['feeds', 'tokens'].includes(s) ? 'hot-applied on save' : 'saved to disk; restart required to apply');
+    } catch (err) { await handleApiError(err, `Load [${s}]`); }
+}
+
+async function saveSection() {
+    let payload;
+    try { payload = JSON.parse($('sectionEditor').value); }
+    catch (e) { log('Invalid JSON: ' + e.message, true); return; }
+    if (JSON.stringify(payload).includes('****')) {
+        log('Refusing to save: payload contains redacted token values (****). Enter real keys or edit config.toml directly.', true);
+        return;
+    }
+    try {
+        const res = await api('PUT', '/admin/config/' + activeSection, payload);
+        log(`Section [${activeSection}] saved.` + (res && res.restart_required ? ' Restart required to apply.' : ' Applied live.'));
+        await loadAll();
+    } catch (err) { await handleApiError(err, `Save [${activeSection}]`); }
+}
+
+/* ============ tabs & init ============ */
+function showTab(name) {
+    ['feeds', 'config'].forEach(t => {
+        $('tab-' + t).classList.toggle('hidden', t !== name);
+        $('tabBtn-' + t).classList.toggle('tab-active', t === name);
+        $('tabBtn-' + t).classList.toggle('text-slate-400', t !== name);
+    });
+    if (name === 'config') { renderSectionPills(); selectSection(activeSection); }
+}
+
+(function init() {
+    $('apiBase').value = localStorage.getItem('podsync_base') || 'https://podsyncdev.example.com';
+    $('apiToken').value = sessionStorage.getItem('podsync_token') || '';
+    renderSectionPills();
+    log('Ready. Enter your token and hit Connect.');
+    if ($('apiToken').value) connect();
+})();
+</script>
+</body>
+</html>
