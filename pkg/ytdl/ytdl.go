@@ -35,14 +35,14 @@ type PlaylistMetadataThumbnail struct {
 }
 
 type PlaylistEntry struct {
-	Id          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Duration    int    `json:"duration"`
-	UploadDate  string `json:"upload_date"`
-	Thumbnail   string `json:"thumbnail"`
-	Url         string `json:"url"`
-	WebpageUrl  string `json:"webpage_url"`
+	Id          string  `json:"id"`
+	Title       string  `json:"title"`
+	Description string  `json:"description"`
+	Duration    float64 `json:"duration"`
+	UploadDate  string  `json:"upload_date"`
+	Thumbnail   string  `json:"thumbnail"`
+	Url         string  `json:"url"`
+	WebpageUrl  string  `json:"webpage_url"`
 	// Additional fields that yt-dlp may provide
 	Ext           string                 `json:"ext"`
 	EpisodeNumber interface{}            `json:"episode_number"`
