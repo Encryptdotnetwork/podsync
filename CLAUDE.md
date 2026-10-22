@@ -319,9 +319,9 @@ debug = false
 - `/{path}/{feed_id}.xml` - RSS/Podcast feed
 - `/{path}/{feed_id}/{episode_name}` - Episode file download
 - `/{path}/podsync.opml` - OPML export (feeds with `opml = true`)
-- `/{path}/index.html` - Web UI (if enabled, local storage only)
+- `/{path}/index.html` - Web UI (if enabled, local storage only); script lives in `/{path}/index.js` and the page is served with a strict CSP (no inline script). Feed/episode metadata is untrusted and must only be rendered via DOM APIs/`textContent` with scheme-checked URLs, never `innerHTML`
 - `/health` - Health check (returns 503 if episodes failed in last 24h)
-- `/thumbnail?url=...` - Server-side thumbnail proxy (bypasses CDN hotlink protection); restricted to an allowlist of known thumbnail CDN hosts (YouTube, Rumble, Odysee, Vimeo, SoundCloud, Twitch), with dialer-level blocking of private/loopback addresses, redirect re-validation, and a 10MB response cap
+- `/thumbnail?url=...` - Server-side thumbnail proxy (bypasses CDN hotlink protection); restricted to an allowlist of known thumbnail CDN hosts (YouTube, Rumble, Odysee, Vimeo, SoundCloud, Twitch), with dialer-level blocking of private/loopback/special-purpose addresses, redirect re-validation, and a 10MB response cap. Only JPEG, PNG, GIF and WebP are returned: the body is content-sniffed and the response type comes from the sniff, never from upstream; HTML, SVG and anything else get 415. Responses carry `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`
 - `/debug/vars` - Runtime metrics (if `debug_endpoints = true`)
 - `/robots.txt` - Search engine blocking (if `no_index = true`)
 
@@ -350,7 +350,8 @@ All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy
 ### Local Storage
 - Files stored in `{data_dir}/{feed_id}/{episode_name}`
 - All writes (episodes, feed XML, OPML) are atomic: content is written to a temp file in the destination directory, then renamed into place, so clients never observe partially written files (same-directory temp avoids EXDEV across Docker volume mounts)
-- Web UI served from `./html/index.html` if enabled
+- Web UI served from `./html/index.html` and `./html/index.js` if enabled
+- All responses carry `X-Content-Type-Options: nosniff`
 
 ### S3 Storage
 - Files stored with key: `{prefix}/{feed_id}/{episode_name}`
@@ -433,6 +434,7 @@ goimports -w .      # Organize imports and format
 make docker                           # Build local Docker image
 docker run -it --rm localhost/podsync:latest
 ```
+The image runs as UID/GID 10001 (`podsync`), so mounted data/db/config must be readable (and data/db/secrets writable) by that UID. `docker-entrypoint.sh` copies the pinned, checksum-verified yt-dlp from `/opt/yt-dlp` to `/run/yt-dlp` on each start so `self_update` can rewrite it; with a read-only root filesystem, mount a tmpfs (with `exec`) at `/run/yt-dlp` and a writable disk-backed volume at `/tmp` (downloads in progress, yt-dlp/deno caches). Bump `YTDLP_VERSION`/`YTDLP_SHA256` in the Dockerfile together.
 
 ### Development Debugging
 Use VS Code with the Go extension. The repository includes `.vscode/launch.json` with a "Debug Podsync" configuration that runs with `config.toml`.

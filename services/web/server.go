@@ -7,9 +7,12 @@ import (
 	"expvar"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -101,8 +104,34 @@ func New(cfg Config, storage http.FileSystem, database db.Storage) *Server {
 		mux.HandleFunc("/robots.txt", robotsTxtHandler)
 		srv.Handler = noIndexMiddleware(srv.Handler)
 	}
+	srv.Handler = securityHeadersMiddleware(srv.Handler, cfg)
 
 	return &srv
+}
+
+// webUICSP is the Content-Security-Policy for the web UI page. Scripts load only
+// from this origin (no inline script or handlers), styles and icon fonts may come
+// from the pinned jsDelivr assets, and images/media stay same-origin (external
+// cover art goes through /thumbnail).
+const webUICSP = "default-src 'none'; script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net; " +
+	"img-src 'self' data:; media-src 'self'; connect-src 'self'; " +
+	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+// securityHeadersMiddleware disables MIME sniffing on every response and applies
+// the web UI's Content-Security-Policy to the page itself.
+func securityHeadersMiddleware(next http.Handler, cfg Config) http.Handler {
+	uiRoot := path.Clean("/" + cfg.Path)
+	uiIndex := path.Join(uiRoot, "index.html")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if cfg.WebUIEnabled {
+			if p := path.Clean(r.URL.Path); p == uiRoot || p == uiIndex {
+				w.Header().Set("Content-Security-Policy", webUICSP)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 type HealthStatus struct {
@@ -185,9 +214,38 @@ func thumbnailHostAllowed(host string) bool {
 	return false
 }
 
+// disallowedPrefixes are special-purpose ranges not covered by the net.IP
+// helpers below: "this network", carrier-grade NAT, IETF protocol assignments,
+// benchmarking, reserved space, NAT64 (which can embed private IPv4 targets)
+// and 6to4.
+var disallowedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2002::/16"),
+}
+
 func isDisallowedIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap()
+	for _, prefix := range disallowedPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // safeDialContext resolves the target itself, rejects the connection if any
@@ -221,6 +279,42 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 // maxThumbnailBytes caps proxied image responses.
 const maxThumbnailBytes = 10 << 20 // 10 MB
 
+// thumbnailAllowedTypes are the raster formats the proxy passes through, keyed by
+// the type http.DetectContentType reports for the body. Anything else (HTML, SVG,
+// XML, scripts, unknown binaries) is rejected so upstream content can never be
+// rendered as an active document under this origin.
+var thumbnailAllowedTypes = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// thumbnailDeclaredTypeAllowed reports whether the upstream Content-Type header is
+// compatible with a raster image. Some CDNs omit it or send a generic binary type,
+// so those are accepted and the body sniff decides.
+func thumbnailDeclaredTypeAllowed(header string) bool {
+	if header == "" {
+		return true
+	}
+	mediaType, _, err := mime.ParseMediaType(header)
+	if err != nil {
+		return false
+	}
+	if mediaType == "application/octet-stream" || mediaType == "binary/octet-stream" {
+		return true
+	}
+	return strings.HasPrefix(mediaType, "image/") && mediaType != "image/svg+xml"
+}
+
+// setThumbnailSecurityHeaders stops browsers from sniffing or rendering the proxied
+// bytes as anything other than the validated image type.
+func setThumbnailSecurityHeaders(h http.Header) {
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	h.Set("Cross-Origin-Resource-Policy", "same-origin")
+}
+
 var thumbnailProxyClient = &http.Client{
 	Timeout:   10 * time.Second,
 	Transport: &http.Transport{DialContext: safeDialContext},
@@ -239,8 +333,17 @@ var thumbnailProxyClient = &http.Client{
 // the browser. This bypasses CDN hotlink protection that blocks cross-origin <img>
 // requests (Sec-Fetch-Site: cross-site) even when referrerpolicy="no-referrer" is set.
 // Only known thumbnail CDN hosts are proxied, and connections to private/loopback
-// addresses are blocked at the dialer level (SSRF protection).
+// addresses are blocked at the dialer level (SSRF protection). Only validated
+// raster images are returned; the response type comes from the body, not upstream.
 func thumbnailProxyHandler(w http.ResponseWriter, r *http.Request) {
+	setThumbnailSecurityHeaders(w.Header())
+
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	rawURL := r.URL.Query().Get("url")
 	if rawURL == "" {
 		http.Error(w, "missing url parameter", http.StatusBadRequest)
@@ -273,13 +376,40 @@ func thumbnailProxyHandler(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		http.Error(w, "upstream returned non-200", resp.StatusCode)
+		http.Error(w, "upstream returned non-200", http.StatusBadGateway)
 		return
 	}
 
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
+	if resp.ContentLength > maxThumbnailBytes {
+		http.Error(w, "image too large", http.StatusBadGateway)
+		return
 	}
+
+	if !thumbnailDeclaredTypeAllowed(resp.Header.Get("Content-Type")) {
+		http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	// Sniff the leading bytes (http.DetectContentType looks at most at 512).
+	head := make([]byte, 512)
+	n, err := io.ReadFull(resp.Body, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+		http.Error(w, "failed to read image", http.StatusBadGateway)
+		return
+	}
+	head = head[:n]
+
+	contentType := http.DetectContentType(head)
+	if !thumbnailAllowedTypes[contentType] {
+		http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+		return
+	}
+
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	io.Copy(w, io.LimitReader(resp.Body, maxThumbnailBytes)) //nolint:errcheck
+	if r.Method == http.MethodHead {
+		return
+	}
+	w.Write(head)                                                             //nolint:errcheck
+	io.Copy(w, io.LimitReader(resp.Body, maxThumbnailBytes-int64(len(head)))) //nolint:errcheck
 }
