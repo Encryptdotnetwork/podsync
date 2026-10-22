@@ -28,9 +28,16 @@ func NewLocal(rootDir string, webUIEnabled bool, noListing bool) (*Local, error)
 	return &Local{rootDir: rootDir, WebUIEnabled: webUIEnabled, NoListing: noListing}, nil
 }
 
+// webUIFiles maps the web UI's request paths to their on-disk locations. They are
+// served only when the web UI is enabled.
+var webUIFiles = map[string]string{
+	"/index.html": "./html/index.html",
+	"/index.js":   "./html/index.js",
+}
+
 func (l *Local) Open(name string) (http.File, error) {
-	if name == "/index.html" && l.WebUIEnabled {
-		return os.Open("./html/index.html")
+	if file, ok := webUIFiles[name]; ok && l.WebUIEnabled {
+		return os.Open(file)
 	}
 	path := filepath.Join(l.rootDir, name)
 	file, err := os.Open(path)
