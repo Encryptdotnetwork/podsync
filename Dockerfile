@@ -18,8 +18,8 @@ RUN wget -O /usr/bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/download/
     echo "${YTDLP_SHA256}  /usr/bin/yt-dlp" | sha256sum -c - && \
     chmod 0755 /usr/bin/yt-dlp
 
-# Alpine 3.22 will go EOL on 2027-05-01
-FROM alpine:3.22.7
+# Alpine 3.24 will go EOL on 2028-05-01
+FROM alpine:3.24.4
 
 WORKDIR /app
 

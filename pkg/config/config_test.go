@@ -268,8 +268,8 @@ func TestDefaultHostname(t *testing.T) {
 
 func TestDefaultDatabasePath(t *testing.T) {
 	cfg := Config{}
-	cfg.applyDefaults(filepath.Join("/home/user/podsync", "config.toml"))
-	assert.Equal(t, filepath.Join("/home/user/podsync", "db"), cfg.Database.Dir)
+	cfg.applyDefaults(filepath.Join("home", "user", "podsync", "config.toml"))
+	assert.Equal(t, filepath.Join("home", "user", "podsync", "db"), cfg.Database.Dir)
 }
 
 func TestLoadBadgerConfig(t *testing.T) {
