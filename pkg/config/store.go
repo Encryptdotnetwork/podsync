@@ -126,7 +126,14 @@ func (s *Store) Update(ifMatch string, mutate func(doc *tomledit.Document) error
 		return nil, errors.Wrap(err, "validation failed, config not saved")
 	}
 
-	if _, err := fs.WriteFileAtomic(s.path, bytes.NewReader(out), 0644); err != nil {
+	// Keep the existing file mode: config.toml holds API tokens and is often
+	// deliberately not world-readable, which a fixed 0644 would undo
+	perm := os.FileMode(0600)
+	if info, err := os.Stat(s.path); err == nil {
+		perm = info.Mode().Perm()
+	}
+
+	if _, err := fs.WriteFileAtomic(s.path, bytes.NewReader(out), perm); err != nil {
 		return nil, errors.Wrapf(ErrWriteFailed, "%v", err)
 	}
 

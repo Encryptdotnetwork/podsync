@@ -309,6 +309,14 @@ debug = false
 - youtube-dl/yt-dlp automatically handles Odysee video downloads
 - Respects `page_size` configuration for pagination
 
+### Rumble (`pkg/builder/rumble.go`)
+- **Supported**: Channels (`/c/{name}`), user playlists (`/playlists/{id}`), single videos (`/v{id}-slug.html`)
+- No API key required
+- Channels: one `yt-dlp --flat-playlist --playlist-items 1:{page_size}` call (`PlaylistEntries`) returns the channel fields plus the newest `page_size` entries; flat entries carry no metadata, so episode ID and title come from the URL slug
+- User playlists: yt-dlp has no extractor for them, so the builder reads the OG tags of the playlist page and parses the HTMX endpoint `/-playlists/htmx/get-playlist-details` (items are associated by byte offset: thumbnail before the href, title and `<time datetime>` after it). HTML entities in titles, descriptions and URLs are decoded
+- PubDate: the playlist item's upload time when present; otherwise (channels, undated items) the discovery time minus one second per list position, so newest-first listings keep their order. Episodes are stored once, so the date of an existing episode never changes
+- Downloads go through yt-dlp with the individual video URL
+
 ### API Key Rotation
 - All platforms support multiple keys for rotation
 - Round-robin rotation via `RotatedKeyProvider` in `pkg/feed/key.go`
@@ -319,9 +327,9 @@ debug = false
 - `/{path}/{feed_id}.xml` - RSS/Podcast feed
 - `/{path}/{feed_id}/{episode_name}` - Episode file download
 - `/{path}/podsync.opml` - OPML export (feeds with `opml = true`)
-- `/{path}/index.html` - Web UI (if enabled, local storage only)
+- `/{path}/index.html` - Web UI (if enabled, local storage only); script lives in `/{path}/index.js` and the page is served with a strict CSP (no inline script). Feed/episode metadata is untrusted and must only be rendered via DOM APIs/`textContent` with scheme-checked URLs, never `innerHTML`
 - `/health` - Health check (returns 503 if episodes failed in last 24h)
-- `/thumbnail?url=...` - Server-side thumbnail proxy (bypasses CDN hotlink protection); restricted to an allowlist of known thumbnail CDN hosts (YouTube, Rumble, Odysee, Vimeo, SoundCloud, Twitch), with dialer-level blocking of private/loopback addresses, redirect re-validation, and a 10MB response cap
+- `/thumbnail?url=...` - Server-side thumbnail proxy (bypasses CDN hotlink protection); restricted to an allowlist of known thumbnail CDN hosts (YouTube, Rumble, Odysee, Vimeo, SoundCloud, Twitch), with dialer-level blocking of private/loopback/special-purpose addresses, redirect re-validation, and a 10MB response cap. Only JPEG, PNG, GIF and WebP are returned: the body is content-sniffed and the response type comes from the sniff, never from upstream; HTML, SVG and anything else get 415. Responses carry `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`
 - `/debug/vars` - Runtime metrics (if `debug_endpoints = true`)
 - `/robots.txt` - Search engine blocking (if `no_index = true`)
 
@@ -339,7 +347,8 @@ All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy
 - `POST /admin/reload` - Re-read config.toml from disk (after hand edits)
 
 ### Semantics
-- All edits go through `config.Store`: mutate the TOML document via tomledit (comments and key order preserved), validate via the standard config validation, then write atomically (temp file + rename in the same directory). Invalid payloads return 400 and never touch disk.
+- All edits go through `config.Store`: mutate the TOML document via tomledit (comments and key order preserved), validate via the standard config validation, then write atomically (temp file + rename in the same directory, keeping the existing file mode). Invalid payloads return 400 and never touch disk.
+- Store snapshots are shared read-only: `store.Get()` returns the same `*Config` (and `*feed.Config` pointers) to the scheduler and the admin handlers, so never write into it — derive values locally (the scheduler computes the implicit `@every {update_period}` schedule without storing it back).
 - Optimistic concurrency: GET responses carry an `ETag` header (SHA-256 of the file); send it back via `If-Match` on PUT/DELETE — a mismatch returns 412.
 - Hot reload: changes to `[feeds]` and `[tokens]` are applied live — the store publishes the new config to the update scheduler, which rebuilds the cron table and the update manager between feed updates (active 429 backoffs are carried over). Other sections (`server`, `storage`, `database`, `downloader`, `log`, `admin`) are saved to disk but require a restart (`restart_required: true` in the response).
 - Replacing a section or feed replaces its block wholesale, including comments inside that block; comments elsewhere in the file are preserved.
@@ -350,7 +359,8 @@ All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy
 ### Local Storage
 - Files stored in `{data_dir}/{feed_id}/{episode_name}`
 - All writes (episodes, feed XML, OPML) are atomic: content is written to a temp file in the destination directory, then renamed into place, so clients never observe partially written files (same-directory temp avoids EXDEV across Docker volume mounts)
-- Web UI served from `./html/index.html` if enabled
+- Web UI served from `./html/index.html` and `./html/index.js` if enabled
+- All responses carry `X-Content-Type-Options: nosniff`
 
 ### S3 Storage
 - Files stored with key: `{prefix}/{feed_id}/{episode_name}`
@@ -433,6 +443,7 @@ goimports -w .      # Organize imports and format
 make docker                           # Build local Docker image
 docker run -it --rm localhost/podsync:latest
 ```
+The image runs as UID/GID 10001 (`podsync`), so mounted data/db/config must be readable (and data/db/secrets writable) by that UID. `docker-entrypoint.sh` copies the pinned, checksum-verified yt-dlp from `/opt/yt-dlp` to `/run/yt-dlp` on each start so `self_update` can rewrite it; with a read-only root filesystem, mount a tmpfs (with `exec`) at `/run/yt-dlp` and a writable disk-backed volume at `/tmp` (downloads in progress, yt-dlp/deno caches). Bump `YTDLP_VERSION`/`YTDLP_SHA256` in the Dockerfile together.
 
 ### Development Debugging
 Use VS Code with the Go extension. The repository includes `.vscode/launch.json` with a "Debug Podsync" configuration that runs with `config.toml`.
@@ -540,6 +551,8 @@ This project uses golangci-lint with strict formatting rules configured in `.gol
 - Vimeo builder: `pkg/builder/vimeo.go`
 - SoundCloud builder: `pkg/builder/soundcloud.go`
 - Twitch builder: `pkg/builder/twitch.go`
+- Odysee builder: `pkg/builder/odysee.go`
+- Rumble builder: `pkg/builder/rumble.go`
 - URL parsing: `pkg/builder/url.go`
 - youtube-dl wrapper: `pkg/ytdl/ytdl.go`
 - Hooks: `pkg/feed/hooks.go`

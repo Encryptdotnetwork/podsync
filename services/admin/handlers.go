@@ -334,12 +334,12 @@ func removeKeyPrefix(doc *tomledit.Document, prefix parser.Key) {
 
 	var kept []*tomledit.Section
 	for _, section := range doc.Sections {
-		if section.Heading != nil && hasPrefix(section.Heading.Name) {
+		if section.Heading != nil && hasPrefix(section.Name) {
 			continue
 		}
 		var name parser.Key
 		if section.Heading != nil {
-			name = section.Heading.Name
+			name = section.Name
 		}
 		section.Items = filterItems(name, section.Items)
 		kept = append(kept, section)
@@ -363,17 +363,17 @@ func spliceFragment(doc, frag *tomledit.Document) {
 	existing := make(map[string]*tomledit.Section)
 	for _, section := range doc.Sections {
 		if section.Heading != nil {
-			existing[keyString(section.Heading.Name)] = section
+			existing[keyString(section.Name)] = section
 		}
 	}
 
 	for _, section := range frag.Sections {
 		if section.Heading != nil {
-			if present, ok := existing[keyString(section.Heading.Name)]; ok {
+			if present, ok := existing[keyString(section.Name)]; ok {
 				present.Items = append(present.Items, section.Items...)
 				continue
 			}
-			existing[keyString(section.Heading.Name)] = section
+			existing[keyString(section.Name)] = section
 		}
 		doc.Sections = append(doc.Sections, section)
 	}

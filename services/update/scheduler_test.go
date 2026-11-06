@@ -79,6 +79,21 @@ func TestSchedulerRebuildSchedule(t *testing.T) {
 	assert.Len(t, s.cron.Entries(), 2)
 }
 
+// The feed configs are shared with the config store snapshot that the admin API
+// serves, so scheduling must not write the derived "@every" schedule back into them.
+func TestSchedulerRebuildScheduleDoesNotMutateFeedConfigs(t *testing.T) {
+	s := newTestScheduler(t, map[string]*feed.Config{
+		"A": {URL: "https://youtube.com/channel/a", UpdatePeriod: time.Hour},
+	})
+
+	s.rebuildSchedule()
+	assert.Empty(t, s.feeds["A"].CronSchedule)
+
+	// A second rebuild must still treat the feed as implicitly scheduled
+	assert.ElementsMatch(t, []string{"A"}, s.rebuildSchedule())
+	assert.Len(t, s.cron.Entries(), 1)
+}
+
 func TestSchedulerInvalidCronScheduleSkipsFeed(t *testing.T) {
 	s := newTestScheduler(t, map[string]*feed.Config{
 		"GOOD": {URL: "https://youtube.com/channel/good", UpdatePeriod: time.Hour},

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -51,9 +52,25 @@ func setPageSize(t *testing.T, size int) func(doc *tomledit.Document) error {
 		if e == nil || e.KeyValue == nil {
 			return errors.New("feeds.A.page_size not found")
 		}
-		e.KeyValue.Value = parser.MustValue(fmt.Sprintf("%d", size))
+		e.Value = parser.MustValue(fmt.Sprintf("%d", size))
 		return nil
 	}
+}
+
+func TestStoreUpdatePreservesFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes are not supported on Windows")
+	}
+
+	store, path := setupStore(t)
+	require.NoError(t, os.Chmod(path, 0640))
+
+	_, err := store.Update("", setPageSize(t, 25))
+	require.NoError(t, err)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0640), info.Mode().Perm())
 }
 
 func TestStoreGet(t *testing.T) {
@@ -149,7 +166,7 @@ func TestStoreUpdateMutateErrorAborts(t *testing.T) {
 		// Mutate first, then fail: nothing must be written
 		e := doc.First("server", "port")
 		require.NotNil(t, e)
-		e.KeyValue.Value = parser.MustValue("9999")
+		e.Value = parser.MustValue("9999")
 		return boom
 	})
 	require.Error(t, err)

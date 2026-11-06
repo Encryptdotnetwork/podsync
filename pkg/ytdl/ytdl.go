@@ -199,58 +199,57 @@ func (dl *YoutubeDl) Update(ctx context.Context) error {
 	return nil
 }
 
+// PlaylistMetadata fetches playlist-level metadata only (title, thumbnails, channel).
+// --playlist-items 0 selects no entries, so youtube-dl doesn't enumerate the playlist.
 func (dl *YoutubeDl) PlaylistMetadata(ctx context.Context, url string) (metadata PlaylistMetadata, err error) {
 	log.Info("getting playlist metadata for: ", url)
 	args := []string{
-		"--flat-playlist", // Get flat playlist format with entries
-		"-J",              // JSON output
-		"-q",              // quiet mode
-		"--no-warnings",   // suppress warnings
-		"--skip-download", // Don't download videos
+		"--playlist-items", "0",
+		"-J",            // JSON output
+		"-q",            // quiet mode
+		"--no-warnings", // suppress warnings
 		url,
 	}
 
 	dl.execLock.RLock()
 	defer dl.execLock.RUnlock()
 
-	var playlistMetadata PlaylistMetadata
-	if err := dl.execJSON(ctx, &playlistMetadata, args...); err != nil {
+	if err := dl.execJSON(ctx, &metadata, args...); err != nil {
 		log.WithError(err).Errorf("youtube-dl error: %s", url)
 		return PlaylistMetadata{}, err
 	}
 
-	log.Infof("Parsed metadata: %d entries found", len(playlistMetadata.Entries))
-	return playlistMetadata, nil
+	return metadata, nil
 }
 
-// ChannelMetadata fetches channel-level metadata (title, description, author).
-// It runs with --flat-playlist and --playlist-items 1 so youtube-dl doesn't resolve
-// per-video metadata for the entire channel; callers only consume channel-level fields.
-func (dl *YoutubeDl) ChannelMetadata(ctx context.Context, url string) (metadata PlaylistMetadata, err error) {
-	log.Info("getting channel metadata for: ", url)
+// PlaylistEntries fetches playlist-level metadata plus the first limit entries in
+// flat form (no per-video extraction). Only the requested entries are fetched, so
+// the cost doesn't grow with the size of the channel or playlist.
+func (dl *YoutubeDl) PlaylistEntries(ctx context.Context, url string, limit int) (metadata PlaylistMetadata, err error) {
+	if limit <= 0 {
+		return PlaylistMetadata{}, errors.New("playlist entry limit must be positive")
+	}
+
+	log.Infof("getting up to %d playlist entries for: %s", limit, url)
 	args := []string{
-		"--flat-playlist",  // Don't resolve individual video metadata
-		"--playlist-items", // Entries are not consumed by callers,
-		"1",                // so fetch a single channel page only
-		"-J",               // JSON output
-		"-q",               // quiet mode
-		"--no-warnings",    // suppress warnings
-		"--skip-download",  // Don't download videos
+		"--flat-playlist", // Don't resolve individual video metadata
+		"--playlist-items", fmt.Sprintf("1:%d", limit),
+		"-J",            // JSON output
+		"-q",            // quiet mode
+		"--no-warnings", // suppress warnings
 		url,
 	}
 
 	dl.execLock.RLock()
 	defer dl.execLock.RUnlock()
 
-	var channelMetadata PlaylistMetadata
-	if err := dl.execJSON(ctx, &channelMetadata, args...); err != nil {
-		log.WithError(err).Errorf("youtube-dl error fetching channel metadata: %s", url)
+	if err := dl.execJSON(ctx, &metadata, args...); err != nil {
+		log.WithError(err).Errorf("youtube-dl error: %s", url)
 		return PlaylistMetadata{}, err
 	}
 
-	log.Debugf("Channel metadata retrieved: title=%q, channel=%q, description=%q",
-		channelMetadata.Title, channelMetadata.Channel, channelMetadata.Description)
-	return channelMetadata, nil
+	log.Debugf("parsed playlist metadata: %d entries", len(metadata.Entries))
+	return metadata, nil
 }
 
 func (dl *YoutubeDl) Download(ctx context.Context, feedConfig *feed.Config, episode *model.Episode) (r io.ReadCloser, err error) {
