@@ -3,6 +3,7 @@ package builder
 import (
 	"context"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -75,19 +76,16 @@ func (rb *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fe
 		_feed.PageSize = 50
 	}
 
-	// Get channel metadata without flat-playlist (for title, description, etc.)
-	channelTitle, channelDesc, channelAuthor := rb.fetchChannelMetadata(ctx, rumbleURL)
-
-	// Get playlist entries using flat-playlist
-	metadata, err := rb.downloader.PlaylistMetadata(ctx, rumbleURL)
+	// A single flat-playlist call returns the channel-level fields along with
+	// the newest page_size entries, so large channels aren't enumerated in full
+	metadata, err := rb.downloader.PlaylistEntries(ctx, rumbleURL, _feed.PageSize)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to fetch Rumble playlist metadata from %s", rumbleURL)
 	}
 
-	log.Infof("Rumble channel metadata: title=%q, entries=%d", channelTitle, len(metadata.Entries))
+	log.Infof("Rumble channel metadata: title=%q, entries=%d", metadata.Title, len(metadata.Entries))
 
-	// Set feed title from channel metadata, fallback to channel variable
-	_feed.Title = channelTitle
+	_feed.Title = metadata.Title
 	if _feed.Title == "" {
 		_feed.Title = metadata.Channel
 	}
@@ -95,17 +93,12 @@ func (rb *RumbleBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.Fe
 		_feed.Title = "Rumble Channel"
 	}
 
-	// Set feed description from channel metadata
-	_feed.Description = channelDesc
+	_feed.Description = metadata.Description
 	if _feed.Description == "" {
 		_feed.Description = fmt.Sprintf("Rumble channel: %s", _feed.Title)
 	}
 
-	// Set author
-	_feed.Author = channelAuthor
-	if _feed.Author == "" {
-		_feed.Author = metadata.Channel
-	}
+	_feed.Author = metadata.Channel
 
 	// Set URL
 	_feed.ItemURL = metadata.ChannelUrl
@@ -136,6 +129,11 @@ func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, fe
 	}
 
 	log.Infof("Processing %d Rumble entries into episodes", len(metadata.Entries))
+
+	// Flat entries usually carry no upload date. Entries are listed newest
+	// first, so undated ones get a timestamp one second older per position to
+	// keep that order (and a deterministic keep_last) in the generated feed.
+	now := time.Now().UTC()
 
 	// Parse yt-dlp entries into episodes
 	for i, entry := range metadata.Entries {
@@ -171,15 +169,11 @@ func (rb *RumbleBuilder) parseEpisodes(ctx context.Context, cfg *feed.Config, fe
 		log.Debugf("Processing entry %d: id=%s, title=%s", i, episodeId, episodeTitle)
 
 		// Parse upload date (YYYYMMDD format from yt-dlp)
-		var pubDate time.Time
+		pubDate := rumbleFallbackPubDate(now, i)
 		if entry.UploadDate != "" {
 			if t, err := time.Parse("20060102", entry.UploadDate); err == nil {
 				pubDate = t
-			} else {
-				pubDate = time.Now().UTC()
 			}
-		} else {
-			pubDate = time.Now().UTC()
 		}
 
 		// Duration in seconds
@@ -282,11 +276,10 @@ func cleanTitleFromSlug(slug string) string {
 	return title
 }
 
-// extractVideoIdFromRumbleUrl is a helper that extracts just the video ID
-// Kept for backward compatibility
-func extractVideoIdFromRumbleUrl(rumbleUrl string) string {
-	id, _ := extractRumbleIdAndTitle(rumbleUrl)
-	return id
+// rumbleFallbackPubDate dates an entry without an upload date relative to now,
+// one second older per list position, so a newest-first listing keeps its order.
+func rumbleFallbackPubDate(now time.Time, index int) time.Time {
+	return now.Add(-time.Duration(index) * time.Second)
 }
 
 // maxRumbleResponseBytes caps Rumble page/API responses read into memory.
@@ -306,6 +299,10 @@ var rumbleThumbnailRegex = regexp.MustCompile(`class="thumbnail__image[^"]*"[^>]
 var rumbleVideoHrefRegex = regexp.MustCompile(`href="(/v[a-zA-Z0-9]+-[^"?]+\.html)`)
 var rumbleTitleAttrRegex = regexp.MustCompile(`class="thumbnail__title[^"]*"[^>]*title="([^"]+)"`)
 
+// rumbleTimeRegex matches an item's upload time, which follows its href anchor:
+// <time class="videostream__data--subitem videostream__time" datetime="2026-05-16T07:58:12-04:00">
+var rumbleTimeRegex = regexp.MustCompile(`<time[^>]*datetime="([^"]+)"`)
+
 // rumbleVideoIDRegex is a fallback when the href regex finds nothing.
 var rumbleVideoIDRegex = regexp.MustCompile(`data-video-id="(\d+)"`)
 
@@ -313,17 +310,21 @@ type rumblePlaylistEntry struct {
 	URL       string
 	Thumbnail string
 	Title     string
+	Published time.Time // zero if the markup carries no upload time
 }
 
+// parseRumbleOGTag returns the named Open Graph value with HTML entities decoded
+// (the feed generator escapes text itself, so encoded input would be shown
+// literally, e.g. "They&#39;re").
 func parseRumbleOGTag(body []byte, name string) string {
 	for _, m := range rumbleOGTagRegex.FindAllSubmatch(body, -1) {
 		if string(m[1]) == name {
-			return string(m[2])
+			return html.UnescapeString(string(m[2]))
 		}
 	}
 	for _, m := range rumbleOGTagRegex2.FindAllSubmatch(body, -1) {
 		if string(m[2]) == name {
-			return string(m[1])
+			return html.UnescapeString(string(m[1]))
 		}
 	}
 	return ""
@@ -359,8 +360,10 @@ func extractRumblePlaylistEntries(body []byte) []rumblePlaylistEntry {
 
 	thumbMatches := rumbleThumbnailRegex.FindAllSubmatchIndex(body, -1)
 	titleMatches := rumbleTitleAttrRegex.FindAllSubmatchIndex(body, -1)
+	timeMatches := rumbleTimeRegex.FindAllSubmatchIndex(body, -1)
 
-	log.Debugf("Rumble playlist parse: hrefs=%d thumbs=%d titles=%d", len(anchors), len(thumbMatches), len(titleMatches))
+	log.Debugf("Rumble playlist parse: hrefs=%d thumbs=%d titles=%d times=%d",
+		len(anchors), len(thumbMatches), len(titleMatches), len(timeMatches))
 
 	entries := make([]rumblePlaylistEntry, len(anchors))
 	for i, anchor := range anchors {
@@ -374,8 +377,16 @@ func extractRumblePlaylistEntries(body []byte) []rumblePlaylistEntry {
 		}
 
 		entries[i].URL = "https://rumble.com" + anchor.href
-		entries[i].Thumbnail = lastMatchBetween(body, thumbMatches, prevStart, anchor.start)
-		entries[i].Title = firstMatchBetween(body, titleMatches, anchor.start, nextStart)
+		entries[i].Thumbnail = html.UnescapeString(lastMatchBetween(body, thumbMatches, prevStart, anchor.start))
+		entries[i].Title = html.UnescapeString(firstMatchBetween(body, titleMatches, anchor.start, nextStart))
+
+		if raw := firstMatchBetween(body, timeMatches, anchor.start, nextStart); raw != "" {
+			if published, err := time.Parse(time.RFC3339, raw); err == nil {
+				entries[i].Published = published.UTC()
+			} else {
+				log.Debugf("Rumble playlist: cannot parse upload time %q: %v", raw, err)
+			}
+		}
 	}
 	return entries
 }
@@ -457,6 +468,7 @@ func (rb *RumbleBuilder) buildFromPlaylist(ctx context.Context, cfg *feed.Config
 		ItemURL:         playlistURL,
 	}
 
+	now := time.Now().UTC()
 	for i, entry := range entries {
 		episodeID, slugTitle := extractRumbleIdAndTitle(entry.URL)
 		if episodeID == "" {
@@ -470,13 +482,17 @@ func (rb *RumbleBuilder) buildFromPlaylist(ctx context.Context, cfg *feed.Config
 		if episodeTitle == "" {
 			episodeTitle = episodeID
 		}
+		pubDate := entry.Published
+		if pubDate.IsZero() {
+			pubDate = rumbleFallbackPubDate(now, i)
+		}
 		_feed.Episodes = append(_feed.Episodes, &model.Episode{
 			ID:          episodeID,
 			Title:       episodeTitle,
 			Description: episodeTitle,
 			Thumbnail:   entry.Thumbnail,
 			VideoURL:    entry.URL,
-			PubDate:     time.Now().UTC(),
+			PubDate:     pubDate,
 			Order:       fmt.Sprintf("%d", i),
 			Status:      model.EpisodeNew,
 		})
@@ -513,7 +529,7 @@ func (rb *RumbleBuilder) fetchPlaylistMeta(ctx context.Context, playlistURL stri
 	// Fall back to <title> tag (Rumble SSR includes it even without OG tags)
 	if title == "" {
 		if m := rumbleHTMLTitleRegex.FindSubmatch(body); m != nil {
-			title = strings.TrimSpace(string(m[1]))
+			title = strings.TrimSpace(html.UnescapeString(string(m[1])))
 		}
 	}
 	if title == "" {
@@ -526,7 +542,7 @@ func (rb *RumbleBuilder) fetchPlaylistMeta(ctx context.Context, playlistURL stri
 	}
 
 	coverArt = parseRumbleOGTag(body, "image")
-	return
+	return title, description, coverArt
 }
 
 // fetchPlaylistVideoURLs calls Rumble's HTMX playlist API and returns playlist entries.
@@ -566,24 +582,4 @@ func (rb *RumbleBuilder) fetchPlaylistVideoURLs(ctx context.Context, playlistID,
 	log.Debugf("Rumble playlist API response (%d bytes): %.2000s", len(body), string(body))
 
 	return extractRumblePlaylistEntries(body), nil
-}
-
-// fetchChannelMetadata makes a separate yt-dlp call without --flat-playlist
-// to extract channel title, description, and author information
-func (rb *RumbleBuilder) fetchChannelMetadata(ctx context.Context, rumbleURL string) (title, description, author string) {
-	metadata, err := rb.downloader.ChannelMetadata(ctx, rumbleURL)
-	if err != nil {
-		log.Warnf("failed to fetch Rumble channel metadata: %v", err)
-		return
-	}
-
-	title = metadata.Title
-	if title == "" {
-		title = metadata.Channel
-	}
-	description = metadata.Description
-	author = metadata.Channel
-
-	log.Debugf("Rumble channel info: title=%q, description=%q, author=%q", title, description, author)
-	return
 }

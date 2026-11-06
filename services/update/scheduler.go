@@ -182,17 +182,18 @@ func (s *Scheduler) rebuildSchedule() []string {
 
 	var implicit []string
 	for _, feedConfig := range s.feeds {
-		// Track if this feed has an explicit cron schedule
-		hasExplicitCronSchedule := feedConfig.CronSchedule != ""
-
-		if feedConfig.CronSchedule == "" {
-			feedConfig.CronSchedule = fmt.Sprintf("@every %s", feedConfig.UpdatePeriod.String())
-		}
-
+		// The feed configs belong to the store's shared snapshot (also read by the
+		// admin API), so derive the effective schedule locally instead of writing
+		// it back into feedConfig.
 		var (
-			feedID   = feedConfig.ID
-			schedule = feedConfig.CronSchedule
+			feedID                  = feedConfig.ID
+			schedule                = feedConfig.CronSchedule
+			hasExplicitCronSchedule = schedule != ""
 		)
+
+		if !hasExplicitCronSchedule {
+			schedule = fmt.Sprintf("@every %s", feedConfig.UpdatePeriod.String())
+		}
 
 		entryID, err := s.cron.AddFunc(schedule, func() {
 			log.Debugf("adding %q to update queue", feedID)

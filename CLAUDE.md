@@ -309,6 +309,14 @@ debug = false
 - youtube-dl/yt-dlp automatically handles Odysee video downloads
 - Respects `page_size` configuration for pagination
 
+### Rumble (`pkg/builder/rumble.go`)
+- **Supported**: Channels (`/c/{name}`), user playlists (`/playlists/{id}`), single videos (`/v{id}-slug.html`)
+- No API key required
+- Channels: one `yt-dlp --flat-playlist --playlist-items 1:{page_size}` call (`PlaylistEntries`) returns the channel fields plus the newest `page_size` entries; flat entries carry no metadata, so episode ID and title come from the URL slug
+- User playlists: yt-dlp has no extractor for them, so the builder reads the OG tags of the playlist page and parses the HTMX endpoint `/-playlists/htmx/get-playlist-details` (items are associated by byte offset: thumbnail before the href, title and `<time datetime>` after it). HTML entities in titles, descriptions and URLs are decoded
+- PubDate: the playlist item's upload time when present; otherwise (channels, undated items) the discovery time minus one second per list position, so newest-first listings keep their order. Episodes are stored once, so the date of an existing episode never changes
+- Downloads go through yt-dlp with the individual video URL
+
 ### API Key Rotation
 - All platforms support multiple keys for rotation
 - Round-robin rotation via `RotatedKeyProvider` in `pkg/feed/key.go`
@@ -339,7 +347,8 @@ All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy
 - `POST /admin/reload` - Re-read config.toml from disk (after hand edits)
 
 ### Semantics
-- All edits go through `config.Store`: mutate the TOML document via tomledit (comments and key order preserved), validate via the standard config validation, then write atomically (temp file + rename in the same directory). Invalid payloads return 400 and never touch disk.
+- All edits go through `config.Store`: mutate the TOML document via tomledit (comments and key order preserved), validate via the standard config validation, then write atomically (temp file + rename in the same directory, keeping the existing file mode). Invalid payloads return 400 and never touch disk.
+- Store snapshots are shared read-only: `store.Get()` returns the same `*Config` (and `*feed.Config` pointers) to the scheduler and the admin handlers, so never write into it — derive values locally (the scheduler computes the implicit `@every {update_period}` schedule without storing it back).
 - Optimistic concurrency: GET responses carry an `ETag` header (SHA-256 of the file); send it back via `If-Match` on PUT/DELETE — a mismatch returns 412.
 - Hot reload: changes to `[feeds]` and `[tokens]` are applied live — the store publishes the new config to the update scheduler, which rebuilds the cron table and the update manager between feed updates (active 429 backoffs are carried over). Other sections (`server`, `storage`, `database`, `downloader`, `log`, `admin`) are saved to disk but require a restart (`restart_required: true` in the response).
 - Replacing a section or feed replaces its block wholesale, including comments inside that block; comments elsewhere in the file are preserved.
@@ -542,6 +551,8 @@ This project uses golangci-lint with strict formatting rules configured in `.gol
 - Vimeo builder: `pkg/builder/vimeo.go`
 - SoundCloud builder: `pkg/builder/soundcloud.go`
 - Twitch builder: `pkg/builder/twitch.go`
+- Odysee builder: `pkg/builder/odysee.go`
+- Rumble builder: `pkg/builder/rumble.go`
 - URL parsing: `pkg/builder/url.go`
 - youtube-dl wrapper: `pkg/ytdl/ytdl.go`
 - Hooks: `pkg/feed/hooks.go`
