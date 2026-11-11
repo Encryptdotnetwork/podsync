@@ -79,15 +79,16 @@ func TestQueueRequeueFront(t *testing.T) {
 	assert.Equal(t, []bool{true}, manual)
 }
 
-func TestQueueHasManualExcept(t *testing.T) {
+func TestQueueHasManual(t *testing.T) {
 	q := newUpdateQueue()
-	assert.False(t, q.hasManualExcept("A"))
-
-	q.push("A", true)
-	assert.False(t, q.hasManualExcept("A"), "a follow-up for the running feed does not count")
-	assert.True(t, q.hasManualExcept("B"))
+	assert.False(t, q.hasManual())
 
 	q.push("S", false)
+	assert.False(t, q.hasManual(), "scheduled entries do not count")
+
+	q.push("A", true)
+	assert.True(t, q.hasManual())
+
 	queued, manual := q.pending("S")
 	assert.True(t, queued)
 	assert.False(t, manual)
@@ -114,7 +115,7 @@ func TestQueueConcurrentUse(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 200; i++ {
 				q.push(fmt.Sprintf("F%d", i%25), (i+g)%3 == 0)
-				q.hasManualExcept("F1")
+				q.hasManual()
 				if i%7 == 0 {
 					q.pop()
 				}

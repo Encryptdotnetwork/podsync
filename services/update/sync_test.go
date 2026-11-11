@@ -455,7 +455,9 @@ func TestSyncNowDuringRunQueuesOneFollowUp(t *testing.T) {
 	env.provider.set("A", syncEpisode("a1", 2), syncEpisode("a2", 1))
 	g := env.dl.addGate("A", "a1")
 
-	env.s.scheduleEnqueue("A")
+	// The running update is itself manual, so it never yields
+	_, err := env.s.SyncNow("A")
+	require.NoError(t, err)
 	env.run()
 	env.waitStarted(g)
 
@@ -473,6 +475,66 @@ func TestSyncNowDuringRunQueuesOneFollowUp(t *testing.T) {
 
 	assert.Equal(t, []string{"A", "A"}, env.provider.built())
 	assert.False(t, env.status("A").Pending)
+	assert.Equal(t, []string{"A/a1", "A/a2"}, env.dl.calls)
+}
+
+type runRecord struct {
+	feedID      string
+	manual      bool
+	interrupted bool
+}
+
+// A scheduled run yields to a manual request for the SAME feed at the next
+// episode boundary: the in-flight download completes, the feed is rebuilt, and
+// exactly one manual run follows without a second scheduled one.
+func TestScheduledRunYieldsToManualRequestForSameFeed(t *testing.T) {
+	env := newSyncEnv(t, "A")
+	env.provider.set("A", syncEpisode("a1", 3), syncEpisode("a2", 2), syncEpisode("a3", 1))
+	g1 := env.dl.addGate("A", "a1")
+	g2 := env.dl.addGate("A", "a2")
+
+	var (
+		mu   sync.Mutex
+		runs []runRecord
+	)
+	env.s.afterRun = func(feedID string, manual bool, res Result, _ error) {
+		mu.Lock()
+		defer mu.Unlock()
+		runs = append(runs, runRecord{feedID, manual, res.Interrupted})
+	}
+
+	env.s.scheduleEnqueue("A")
+	env.run()
+	env.waitStarted(g1)
+
+	_, err := env.s.SyncNow("A")
+	require.NoError(t, err)
+
+	close(g1.release)
+	// The second run reaches a2 only after the first one ended
+	env.waitStarted(g2)
+
+	mu.Lock()
+	require.Len(t, runs, 1)
+	assert.Equal(t, runRecord{"A", false, true}, runs[0], "the scheduled run is interrupted")
+	mu.Unlock()
+
+	assert.Equal(t, model.EpisodeDownloaded, env.episodes("A")["a1"].Status, "the in-flight download completed")
+	assert.Contains(t, env.xml("A"), "<guid>a1</guid>", "the feed is rebuilt on yield")
+	assert.Equal(t, TriggerManual, env.status("A").Trigger)
+	assert.Zero(t, env.s.queue.len(), "no additional scheduled entry")
+
+	close(g2.release)
+	env.waitIdle()
+
+	mu.Lock()
+	assert.Equal(t, []runRecord{{"A", false, true}, {"A", true, false}}, runs)
+	mu.Unlock()
+	assert.Equal(t, []string{"A", "A"}, env.provider.built())
+	assert.Equal(t, []string{"A/a1", "A/a2", "A/a3"}, env.dl.calls, "every episode downloaded exactly once")
+	for id, episode := range env.episodes("A") {
+		assert.Equal(t, model.EpisodeDownloaded, episode.Status, id)
+	}
 }
 
 // Acceptance 7: during a rate-limit backoff the request is refused with the

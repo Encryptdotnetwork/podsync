@@ -116,19 +116,12 @@ func (q *updateQueue) pop() (feedID string, manual bool, ok bool) {
 	return "", false, false
 }
 
-// hasManualExcept reports whether a manual request for a feed other than
-// feedID is waiting. A manual request for the feed that is running right now
-// is a follow-up and gains nothing from interrupting it.
-func (q *updateQueue) hasManualExcept(feedID string) bool {
+// hasManual reports whether any manual request is waiting.
+func (q *updateQueue) hasManual() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	for _, id := range q.manual {
-		if id != feedID {
-			return true
-		}
-	}
-	return false
+	return len(q.manual) > 0
 }
 
 // pending reports whether feedID has an entry, and in which lane.

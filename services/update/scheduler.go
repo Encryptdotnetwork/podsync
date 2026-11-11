@@ -67,6 +67,10 @@ type Scheduler struct {
 
 	// now is the clock; replaced in tests
 	now func() time.Time
+
+	// afterRun, when set (tests only, before Run starts), is called on the Run
+	// goroutine after each update with its outcome
+	afterRun func(feedID string, manual bool, res Result, err error)
 }
 
 // KeyProviders builds API key providers from configured tokens and registers
@@ -187,17 +191,21 @@ func (s *Scheduler) processUpdate(ctx context.Context, feedID string, manual boo
 		return
 	}
 
-	// Scheduled runs step aside between episodes when a manual request for
-	// another feed is waiting; manual runs always run their batch to the end
+	// Scheduled runs step aside between episodes when any manual request is
+	// waiting (for this feed too, so it gets a fresh provider lookup); manual
+	// runs always run their batch to the end
 	var shouldYield func() bool
 	if !manual {
-		shouldYield = func() bool { return s.queue.hasManualExcept(feedID) }
+		shouldYield = func() bool { return s.queue.hasManual() }
 	}
 
 	logger := log.WithFields(log.Fields{"feed_id": feedID, "trigger": triggerName(manual)})
 
 	result, err := s.safeUpdate(ctx, feedConfig, shouldYield)
 	s.recordFinish(feedID, manual, result, err)
+	if s.afterRun != nil {
+		s.afterRun(feedID, manual, result, err)
+	}
 
 	switch {
 	case err != nil:
