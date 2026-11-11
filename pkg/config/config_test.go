@@ -612,6 +612,33 @@ data_dir = "/data"
 	})
 }
 
+func TestFeedIDValidation(t *testing.T) {
+	load := func(t *testing.T, key string) error {
+		t.Helper()
+
+		file := "[server]\ndata_dir = \"/data\"\n\n[feeds]\n  [feeds." + key + "]\n  url = \"https://youtube.com/watch?v=ygIUF678y40\"\n"
+		path := setup(t, file)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		return err
+	}
+
+	for _, key := range []string{`"../../x"`, `"a/b"`, `"a\\b"`, `".."`, `"."`, `""`} {
+		t.Run("rejects "+key, func(t *testing.T) {
+			err := load(t, key)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid feed ID")
+		})
+	}
+
+	for _, key := range []string{`ID1`, `WesRoth`, `"my_feed-2.0"`, `"with space"`} {
+		t.Run("accepts "+key, func(t *testing.T) {
+			assert.NoError(t, load(t, key))
+		})
+	}
+}
+
 func setup(t *testing.T, file string) string {
 	t.Helper()
 

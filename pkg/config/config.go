@@ -47,6 +47,9 @@ type Config struct {
 // DefaultAdminPort is the port the admin API listens on unless configured otherwise.
 const DefaultAdminPort = 8095
 
+// feedIDRegex matches feed IDs that are safe to use in file names and URLs.
+var feedIDRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
 // MinAdminTokenLength is the minimum length of the admin API token.
 const MinAdminTokenLength = 32
 
@@ -162,6 +165,11 @@ func (c *Config) validate() error {
 	}
 
 	for id, f := range c.Feeds {
+		if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\`) {
+			result = multierror.Append(result, errors.Errorf("invalid feed ID %q: must not be empty, \".\" or \"..\" or contain path separators", id))
+		} else if !feedIDRegex.MatchString(id) {
+			log.Warnf("feed ID %q may produce unusable file names or URLs; use only letters, digits, '.', '_' and '-'", id)
+		}
 		if f.URL == "" {
 			result = multierror.Append(result, errors.Errorf("URL is required for %q", id))
 		}
