@@ -779,3 +779,42 @@ func TestStatusSortedAndComplete(t *testing.T) {
 	assert.True(t, sort.StringsAreSorted(ids))
 	assert.Len(t, ids, 3)
 }
+
+// A scheduled tick for a feed that is updating right now is dropped, whether
+// the running update is scheduled or manual; manual requests still queue a
+// follow-up.
+func TestScheduledTickDuringRunIsDropped(t *testing.T) {
+	for name, start := range map[string]func(*syncEnv){
+		"scheduled run": func(env *syncEnv) { env.s.scheduleEnqueue("A") },
+		"manual run": func(env *syncEnv) {
+			_, err := env.s.SyncNow("A")
+			require.NoError(t, err)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newSyncEnv(t, "A")
+			env.provider.set("A", syncEpisode("a1", 1))
+			g := env.dl.addGate("A", "a1")
+
+			start(env)
+			env.run()
+			env.waitStarted(g)
+
+			env.s.scheduleEnqueue("A")
+			env.s.scheduleEnqueue("A")
+			assert.Zero(t, env.s.queue.len())
+			assert.False(t, env.status("A").Pending)
+
+			close(g.release)
+			env.waitIdle()
+
+			assert.Equal(t, []string{"A"}, env.provider.built())
+			assert.Zero(t, env.s.queue.len())
+
+			// Once the run is over, ticks queue normally again
+			env.s.scheduleEnqueue("A")
+			env.waitIdle()
+			assert.Equal(t, []string{"A", "A"}, env.provider.built())
+		})
+	}
+}

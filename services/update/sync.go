@@ -264,12 +264,18 @@ func triggerName(manual bool) string {
 	return TriggerScheduled
 }
 
-// scheduleEnqueue queues a scheduled update unless the feed is already waiting.
+// scheduleEnqueue queues a scheduled update unless the feed is already waiting
+// or is updating right now: a tick during a run would only repeat the provider
+// lookup the run has just made.
 func (s *Scheduler) scheduleEnqueue(feedID string) {
 	now := s.now()
 
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
+
+	if st, ok := s.statuses[feedID]; ok && st.State == StateSyncing {
+		return
+	}
 
 	if s.queue.push(feedID, false) {
 		s.markQueuedLocked(feedID, TriggerScheduled, now)
