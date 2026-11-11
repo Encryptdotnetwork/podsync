@@ -9,8 +9,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mxpv/podsync/pkg/builder"
 	"github.com/mxpv/podsync/pkg/config"
 	"github.com/mxpv/podsync/pkg/feed"
+	"github.com/mxpv/podsync/pkg/model"
 )
 
 // newTestScheduler builds a scheduler without a config store; tests drive
@@ -162,6 +164,39 @@ func TestSchedulerProcessUpdateDropsStaleIDs(t *testing.T) {
 	// A resolvable ID runs through the manager using the current feeds map
 	// (the nil-keyed manager fails the update gracefully, which is logged)
 	s.processUpdate(ctx, "A")
+}
+
+// A panic inside a provider must not take down the daemon: it is recovered,
+// treated as a failed update of that one feed, and later updates still run.
+func TestSchedulerProcessUpdateRecoversFromPanic(t *testing.T) {
+	ctx := context.Background()
+
+	feeds := map[string]*feed.Config{
+		"A": {URL: "https://youtube.com/channel/UCtest", UpdatePeriod: time.Hour},
+	}
+	s := newTestScheduler(t, feeds)
+
+	key, err := feed.NewFixedKey("test-key")
+	require.NoError(t, err)
+
+	manager, err := NewUpdater(
+		feeds,
+		map[model.Provider]feed.KeyProvider{model.ProviderYoutube: key},
+		"http://localhost",
+		nil, nil, nil,
+	)
+	require.NoError(t, err)
+
+	calls := 0
+	manager.newBuilder = func(context.Context, model.Provider, string, builder.Downloader) (builder.Builder, error) {
+		calls++
+		panic("provider exploded")
+	}
+	s.manager = manager
+
+	require.NotPanics(t, func() { s.processUpdate(ctx, "A") })
+	require.NotPanics(t, func() { s.processUpdate(ctx, "A") })
+	assert.Equal(t, 2, calls, "the update must be attempted again after a recovered panic")
 }
 
 func TestSchedulerReloadCarriesBackoffs(t *testing.T) {
