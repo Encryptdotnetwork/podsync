@@ -355,7 +355,9 @@ func removeKeyPrefix(doc *tomledit.Document, prefix parser.Key) {
 // spliceFragment appends the fragment's content to the document. Sections that
 // already exist in the document (e.g. the [feeds] parent table when adding a
 // new [feeds.X]) are merged into the existing section rather than appended,
-// since TOML forbids duplicate table headers.
+// since TOML forbids duplicate table headers. Array-of-tables headings
+// ([[feeds.ID.post_episode_download]]) are the exception: each occurrence is a
+// separate element, so they are always appended and never merged.
 func spliceFragment(doc, frag *tomledit.Document) {
 	if frag.Global != nil && len(frag.Global.Items) > 0 {
 		if doc.Global == nil {
@@ -367,13 +369,13 @@ func spliceFragment(doc, frag *tomledit.Document) {
 
 	existing := make(map[string]*tomledit.Section)
 	for _, section := range doc.Sections {
-		if section.Heading != nil {
+		if section.Heading != nil && !section.IsArray {
 			existing[keyString(section.Name)] = section
 		}
 	}
 
 	for _, section := range frag.Sections {
-		if section.Heading != nil {
+		if section.Heading != nil && !section.IsArray {
 			if present, ok := existing[keyString(section.Name)]; ok {
 				present.Items = append(present.Items, section.Items...)
 				continue

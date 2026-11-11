@@ -267,3 +267,36 @@ func TestAdminReload(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.True(t, *env.reloaded, "reload trigger must be invoked")
 }
+
+// The legacy editor page sends hooks as arrays of tables (the shape produced by
+// its feed mapping); they must survive the PUT and parse back into the config.
+func TestAdminPutFeedKeepsHooks(t *testing.T) {
+	env := setupServer(t, "")
+
+	body := `{"url": "https://youtube.com/channel/h", "page_size": 10,
+		"post_episode_download": [{"command": ["echo", "hi"], "timeout": 10}, {"command": ["curl", "u"]}],
+		"on_episode_download_error": [{"command": ["logger", "failed"], "timeout": 30}]}`
+	rec := env.do(t, http.MethodPut, "/admin/feeds/H", body, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	saved := env.store.Get().Feeds["H"]
+	require.NotNil(t, saved)
+	require.Len(t, saved.PostEpisodeDownload, 2)
+	assert.Equal(t, []string{"echo", "hi"}, saved.PostEpisodeDownload[0].Command)
+	assert.Equal(t, 10, saved.PostEpisodeDownload[0].Timeout)
+	assert.Equal(t, []string{"curl", "u"}, saved.PostEpisodeDownload[1].Command)
+	require.Len(t, saved.OnEpisodeDownloadError, 1)
+	assert.Equal(t, []string{"logger", "failed"}, saved.OnEpisodeDownloadError[0].Command)
+	assert.Equal(t, 30, saved.OnEpisodeDownloadError[0].Timeout)
+
+	data, err := os.ReadFile(env.path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "post_episode_download")
+	assert.Contains(t, string(data), "on_episode_download_error")
+
+	// Replacing the feed without hooks removes every hook table, leaving no orphans
+	rec = env.do(t, http.MethodPut, "/admin/feeds/H", `{"url": "https://youtube.com/channel/h"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, env.store.Get().Feeds["H"].PostEpisodeDownload)
+	assert.Empty(t, env.store.Get().Feeds["H"].OnEpisodeDownloadError)
+}
