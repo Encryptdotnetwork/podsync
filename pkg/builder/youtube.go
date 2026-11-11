@@ -223,7 +223,7 @@ func (yt *YouTubeBuilder) GetVideoCount(ctx context.Context, info *model.Info) (
 	}
 }
 
-func (yt *YouTubeBuilder) queryFeed(ctx context.Context, feed *model.Feed, info *model.Info) error {
+func (yt *YouTubeBuilder) queryFeed(ctx context.Context, feed *model.Feed, info *model.Info, customCover bool) error {
 	var (
 		thumbnails *youtube.ThumbnailDetails
 	)
@@ -281,16 +281,21 @@ func (yt *YouTubeBuilder) queryFeed(ctx context.Context, feed *model.Feed, info 
 		} else { // nolint:golint
 			feed.PubDate = date
 		}
-		metadata, err := yt.downloader.PlaylistMetadata(ctx, feed.ItemURL)
-		if err != nil {
-			return errors.Wrapf(err, "failed to get playlist metadata for %s", feed.ItemURL)
-		}
-		log.Infof("Playlist metadata: %v", metadata)
-		if len(metadata.Thumbnails) > 0 {
-			// best qualtiy thumbnail is the last one
-			feed.CoverArt = metadata.Thumbnails[len(metadata.Thumbnails)-1].Url
-		} else {
-			thumbnails = playlist.Snippet.Thumbnails
+
+		// The cover art lookup (a yt-dlp subprocess) is only a nicety: skip it when a custom cover is configured
+		// and never let its failure abort the update, the API data above is already complete.
+		thumbnails = playlist.Snippet.Thumbnails
+		if !customCover {
+			metadata, err := yt.downloader.PlaylistMetadata(ctx, feed.ItemURL)
+			if err != nil {
+				log.WithError(err).Warnf("failed to get playlist metadata for %s, using API thumbnails", feed.ItemURL)
+			} else {
+				log.Debugf("Playlist metadata: %v", metadata)
+				if len(metadata.Thumbnails) > 0 {
+					// best qualtiy thumbnail is the last one
+					feed.CoverArt = metadata.Thumbnails[len(metadata.Thumbnails)-1].Url
+				}
+			}
 		}
 
 	default:
@@ -499,7 +504,7 @@ func (yt *YouTubeBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.F
 	}
 
 	// Query general information about feed (title, description, lang, etc)
-	if err := yt.queryFeed(ctx, _feed, &info); err != nil {
+	if err := yt.queryFeed(ctx, _feed, &info, cfg.Custom.CoverArt != ""); err != nil {
 		return nil, err
 	}
 

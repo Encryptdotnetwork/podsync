@@ -13,7 +13,9 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 
+	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/model"
+	"github.com/mxpv/podsync/pkg/ytdl"
 )
 
 // MockTransport implements http.RoundTripper for testing
@@ -241,4 +243,77 @@ func TestAPIKeySentInHeader(t *testing.T) {
 	require.Equal(t, testAPIKey, reqs[0].Header.Get("X-Goog-Api-Key"))
 	require.False(t, reqs[0].URL.Query().Has("key"))
 	require.NotContains(t, reqs[0].URL.String(), testAPIKey)
+}
+
+// fakeDownloader is a Downloader that counts PlaylistMetadata calls.
+type fakeDownloader struct {
+	metadata ytdl.PlaylistMetadata
+	err      error
+	calls    int
+}
+
+func (f *fakeDownloader) PlaylistMetadata(ctx context.Context, url string) (ytdl.PlaylistMetadata, error) {
+	f.calls++
+	return f.metadata, f.err
+}
+
+func (f *fakeDownloader) PlaylistEntries(ctx context.Context, url string, limit int) (ytdl.PlaylistMetadata, error) {
+	return ytdl.PlaylistMetadata{}, errors.New("unexpected PlaylistEntries call")
+}
+
+// playlistAPIHandler answers the playlist, playlist items and videos endpoints with one video.
+func playlistAPIHandler(req *http.Request) (*http.Response, error) {
+	switch {
+	case strings.HasSuffix(req.URL.Path, "/playlists"):
+		return jsonResponse(req, `{"items": [{"id": "PL_test", "snippet": {
+			"title": "Playlist", "description": "Desc", "publishedAt": "2020-01-02T03:04:05Z", "channelTitle": "Chan",
+			"thumbnails": {"default": {"url": "https://img.example/api-thumb.jpg"}}}}]}`)
+	case strings.HasSuffix(req.URL.Path, "/playlistItems"):
+		return jsonResponse(req, `{"items": [{"snippet": {"publishedAt": "2020-02-01T00:00:00Z", "position": 0,
+			"resourceId": {"videoId": "vid1"}}}]}`)
+	case strings.HasSuffix(req.URL.Path, "/videos"):
+		return jsonResponse(req, `{"items": [{"id": "vid1", "snippet": {"title": "Video 1", "publishedAt": "2020-01-15T00:00:00Z",
+			"thumbnails": {"default": {"url": "https://img.example/vid1.jpg"}}}, "contentDetails": {"duration": "PT1M"}}]}`)
+	}
+
+	return nil, errors.New("unexpected request: " + req.URL.String())
+}
+
+func TestBuildPlaylistMetadataFailureFallsBack(t *testing.T) {
+	dl := &fakeDownloader{err: errors.New("yt-dlp failed")}
+	yt, _ := newTestBuilder(t, playlistAPIHandler, dl)
+
+	f, err := yt.Build(context.Background(), &feed.Config{URL: "https://www.youtube.com/playlist?list=PL_test"})
+	require.NoError(t, err)
+	require.Equal(t, 1, dl.calls)
+	require.Equal(t, "https://img.example/api-thumb.jpg", f.CoverArt)
+	require.Len(t, f.Episodes, 1)
+	require.Equal(t, "vid1", f.Episodes[0].ID)
+}
+
+func TestBuildPlaylistMetadataCoverArt(t *testing.T) {
+	dl := &fakeDownloader{metadata: ytdl.PlaylistMetadata{Thumbnails: []ytdl.PlaylistMetadataThumbnail{
+		{Url: "https://img.example/small.jpg"},
+		{Url: "https://img.example/best.jpg"},
+	}}}
+	yt, _ := newTestBuilder(t, playlistAPIHandler, dl)
+
+	f, err := yt.Build(context.Background(), &feed.Config{URL: "https://www.youtube.com/playlist?list=PL_test"})
+	require.NoError(t, err)
+	require.Equal(t, "https://img.example/best.jpg", f.CoverArt)
+}
+
+func TestBuildPlaylistCustomCoverSkipsMetadata(t *testing.T) {
+	dl := &fakeDownloader{err: errors.New("must not be called")}
+	yt, _ := newTestBuilder(t, playlistAPIHandler, dl)
+
+	cfg := &feed.Config{
+		URL:    "https://www.youtube.com/playlist?list=PL_test",
+		Custom: feed.Custom{CoverArt: "https://img.example/custom.jpg"},
+	}
+
+	f, err := yt.Build(context.Background(), cfg)
+	require.NoError(t, err)
+	require.Equal(t, 0, dl.calls)
+	require.Len(t, f.Episodes, 1)
 }
