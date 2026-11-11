@@ -652,3 +652,64 @@ func setup(t *testing.T, file string) string {
 
 	return f.Name()
 }
+
+func TestAdminMountAndReservedFeedID(t *testing.T) {
+	const longToken = "0123456789abcdef0123456789abcdef"
+
+	load := func(t *testing.T, content string) (*Config, error) {
+		t.Helper()
+		t.Setenv("PODSYNC_ADMIN_TOKEN", "")
+		require.NoError(t, os.Unsetenv("PODSYNC_ADMIN_TOKEN"))
+
+		path := setup(t, content)
+		defer os.Remove(path)
+
+		return LoadConfig(path)
+	}
+
+	const feeds = `
+[feeds]
+  [feeds.A]
+  url = "https://youtube.com/watch?v=ygIUF678y40"
+`
+	admin := "[admin]\nenabled = true\ntoken = \"" + longToken + "\"\n"
+
+	t.Run("defaults keep the separate listener and read-only config", func(t *testing.T) {
+		cfg, err := load(t, "[server]\ndata_dir = \"/data\"\n"+admin+feeds)
+		require.NoError(t, err)
+		assert.False(t, cfg.Admin.MountOnServer)
+		assert.False(t, cfg.Admin.AllowConfigEdit)
+	})
+
+	t.Run("mount and edit options are read", func(t *testing.T) {
+		cfg, err := load(t, "[server]\ndata_dir = \"/data\"\n"+admin+"mount_on_server = true\nallow_config_edit = true\n"+feeds)
+		require.NoError(t, err)
+		assert.True(t, cfg.Admin.MountOnServer)
+		assert.True(t, cfg.Admin.AllowConfigEdit)
+	})
+
+	t.Run("mount is rejected with s3 storage", func(t *testing.T) {
+		s3 := "[storage]\ntype = \"s3\"\n[storage.s3]\nendpoint_url = \"https://s3.example.test\"\nregion = \"r\"\nbucket = \"b\"\n"
+		_, err := load(t, s3+admin+"mount_on_server = true\n"+feeds)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mount_on_server requires local storage")
+	})
+
+	t.Run("mount is rejected with server path admin", func(t *testing.T) {
+		_, err := load(t, "[server]\ndata_dir = \"/data\"\npath = \"admin\"\n"+admin+"mount_on_server = true\n"+feeds)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "server.path must not be")
+	})
+
+	t.Run("feed ID admin is reserved", func(t *testing.T) {
+		for _, id := range []string{"admin", "ADMIN"} {
+			_, err := load(t, "[server]\ndata_dir = \"/data\"\n[feeds]\n  ["+"feeds."+id+"]\n  url = \"https://youtube.com/watch?v=ygIUF678y40\"\n")
+			require.Error(t, err, id)
+			assert.Contains(t, err.Error(), "reserved for the admin interface")
+		}
+
+		// Longer IDs that merely start with it are fine
+		_, err := load(t, "[server]\ndata_dir = \"/data\"\n[feeds]\n  [feeds.admin2]\n  url = \"https://youtube.com/watch?v=ygIUF678y40\"\n")
+		require.NoError(t, err)
+	})
+}

@@ -43,6 +43,12 @@ type testEnv struct {
 func setupServer(t *testing.T, token string) testEnv {
 	t.Helper()
 
+	return setupServerWith(t, config.Admin{Enabled: true, Token: token, AllowConfigEdit: true}, nil)
+}
+
+func setupServerWith(t *testing.T, cfg config.Admin, syncer Syncer) testEnv {
+	t.Helper()
+
 	path := filepath.Join(t.TempDir(), "config.toml")
 	require.NoError(t, os.WriteFile(path, []byte(adminTestConfig), 0644))
 
@@ -50,11 +56,11 @@ func setupServer(t *testing.T, token string) testEnv {
 	require.NoError(t, err)
 
 	reloaded := false
-	srv := New(config.Admin{Enabled: true, Token: token}, store, func() error {
+	srv := New(cfg, store, func() error {
 		reloaded = true
 		_, err := store.Reload()
 		return err
-	})
+	}, syncer)
 
 	return testEnv{srv: srv, store: store, path: path, reloaded: &reloaded}
 }

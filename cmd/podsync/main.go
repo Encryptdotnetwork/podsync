@@ -228,7 +228,7 @@ func main() {
 		adminSrv := admin.New(cfg.Admin, store, func() error {
 			_, err := store.Reload()
 			return err
-		})
+		}, scheduler)
 
 		group.Go(func() error {
 			log.Infof("running admin API at %s", adminSrv.Addr)
