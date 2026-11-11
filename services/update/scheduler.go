@@ -17,10 +17,10 @@ import (
 )
 
 // Scheduler owns the feed update queue, the cron table and the update Manager.
-// Cron entries enqueue feed IDs into a buffered channel drained by the single
-// Run goroutine, so feed updates never run concurrently with each other — and
-// config reloads, which are handled in the same loop, never interleave with an
-// in-flight update.
+// Cron entries and manual requests push feed IDs into a de-duplicating,
+// non-blocking queue drained by the single Run goroutine, so feed updates
+// never run concurrently with each other, and config reloads, which are
+// handled in the same loop, never interleave with an in-flight update.
 type Scheduler struct {
 	store *config.Store
 
@@ -37,8 +37,9 @@ type Scheduler struct {
 
 	// The queue carries feed IDs, not config pointers: IDs are resolved against
 	// the current feeds map at dequeue time, so items queued before a reload
-	// run with the freshest settings (or are dropped if the feed was removed)
-	updates chan string
+	// run with the freshest settings (or are dropped if the feed was removed).
+	// It is safe for concurrent use.
+	queue *updateQueue
 }
 
 // KeyProviders builds API key providers from configured tokens and registers
@@ -86,7 +87,7 @@ func NewScheduler(store *config.Store, downloader Downloader, db db.Storage, fs 
 		feeds:      cfg.Feeds,
 		cron:       cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger))),
 		entries:    make(map[string]cron.EntryID),
-		updates:    make(chan string, 16),
+		queue:      newUpdateQueue(),
 	}, nil
 }
 
@@ -97,7 +98,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	// Initial schedule: feeds without an explicit cron schedule get an
 	// immediate first update
 	implicit := s.rebuildSchedule()
-	s.enqueue(ctx, implicit)
+	s.enqueue(implicit)
 
 	s.cron.Start()
 	defer func() {
@@ -107,13 +108,39 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 	for {
 		select {
-		case feedID := <-s.updates:
-			s.processUpdate(ctx, feedID)
+		case <-s.queue.wake:
+			if err := s.drain(ctx); err != nil {
+				return err
+			}
 		case newCfg := <-s.store.ReloadCh():
-			s.applyReload(ctx, newCfg)
+			s.applyReload(newCfg)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+}
+
+// drain processes queued updates one at a time until the queue is empty. A
+// pending reload is applied before each item so that the item runs with the
+// freshest configuration, and cancellation is honoured between items.
+func (s *Scheduler) drain(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		select {
+		case newCfg := <-s.store.ReloadCh():
+			s.applyReload(newCfg)
+		default:
+		}
+
+		feedID, _, ok := s.queue.pop()
+		if !ok {
+			return nil
+		}
+
+		s.processUpdate(ctx, feedID)
 	}
 }
 
@@ -153,7 +180,7 @@ func (s *Scheduler) safeUpdate(ctx context.Context, feedConfig *feed.Config) (er
 // map and rebuilds the cron table. On any error the previous configuration
 // stays active. Newly added feeds without an explicit cron schedule are queued
 // for an immediate first update; existing feeds keep their regular cadence.
-func (s *Scheduler) applyReload(ctx context.Context, newCfg *config.Config) {
+func (s *Scheduler) applyReload(newCfg *config.Config) {
 	keys, err := KeyProviders(newCfg.Tokens)
 	if err != nil {
 		log.WithError(err).Error("config reload failed: invalid API tokens, keeping previous configuration")
@@ -181,7 +208,7 @@ func (s *Scheduler) applyReload(ctx context.Context, newCfg *config.Config) {
 			added = append(added, feedID)
 		}
 	}
-	s.enqueue(ctx, added)
+	s.enqueue(added)
 
 	log.Infof("configuration reloaded: %d feed(s) scheduled, %d new", len(s.entries), len(added))
 }
@@ -213,7 +240,7 @@ func (s *Scheduler) rebuildSchedule() []string {
 
 		entryID, err := s.cron.AddFunc(schedule, func() {
 			log.Debugf("adding %q to update queue", feedID)
-			s.updates <- feedID
+			s.queue.push(feedID, false)
 		})
 		if err != nil {
 			// A bad schedule (e.g. from an admin API edit) must never kill the
@@ -235,26 +262,9 @@ func (s *Scheduler) rebuildSchedule() []string {
 	return implicit
 }
 
-// enqueue queues feed IDs for update from a helper goroutine, because the Run
-// goroutine must never block sending to its own queue (the sends would
-// deadlock once the buffer fills up).
-func (s *Scheduler) enqueue(ctx context.Context, feedIDs []string) {
-	if len(feedIDs) == 0 {
-		return
+// enqueue queues feed IDs for a scheduled update. It never blocks.
+func (s *Scheduler) enqueue(feedIDs []string) {
+	for _, feedID := range feedIDs {
+		s.queue.push(feedID, false)
 	}
-
-	go func() {
-		for _, feedID := range feedIDs {
-			select {
-			case s.updates <- feedID:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-}
-
-// Close releases the update queue. Call only after Run has exited.
-func (s *Scheduler) Close() {
-	close(s.updates)
 }

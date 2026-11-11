@@ -193,7 +193,6 @@ func main() {
 	if err != nil {
 		log.WithError(err).Fatal("failed to create scheduler")
 	}
-	defer scheduler.Close()
 
 	group, ctx := errgroup.WithContext(ctx)
 	defer func() {
