@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 
 	"github.com/pkg/errors"
 	"github.com/robfig/cron/v3"
@@ -125,11 +126,26 @@ func (s *Scheduler) processUpdate(ctx context.Context, feedID string) {
 		return
 	}
 
-	if err := s.manager.Update(ctx, feedConfig); err != nil {
+	if err := s.safeUpdate(ctx, feedConfig); err != nil {
 		log.WithError(err).Errorf("failed to update feed: %s", feedConfig.URL)
 	} else if entryID, ok := s.entries[feedID]; ok {
 		log.Infof("next update of %s: %s", feedID, s.cron.Entry(entryID).Next)
 	}
+}
+
+// safeUpdate runs a feed update and converts a panic raised inside it (for
+// example a nil dereference in a provider) into an error, so one misbehaving
+// feed cannot kill the daemon or stop the other feeds from updating.
+func (s *Scheduler) safeUpdate(ctx context.Context, feedConfig *feed.Config) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.WithField("feed_id", feedConfig.ID).
+				Errorf("panic while updating feed: %v\n%s", r, debug.Stack())
+			err = errors.Errorf("panic during update: %v", r)
+		}
+	}()
+
+	return s.manager.Update(ctx, feedConfig)
 }
 
 // applyReload swaps in a new configuration: it rebuilds the key providers and

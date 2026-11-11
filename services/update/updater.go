@@ -30,6 +30,10 @@ type Downloader interface {
 
 type TokenList []string
 
+// builderFactory creates the provider-specific feed builder. It is a field on
+// Manager so tests can substitute a fake provider instead of calling real APIs.
+type builderFactory func(ctx context.Context, provider model.Provider, key string, downloader builder.Downloader) (builder.Builder, error)
+
 const (
 	// maxDownloadAttempts is how many times a failing episode is retried before
 	// being skipped permanently (deleted, geo-blocked or private videos).
@@ -53,6 +57,7 @@ type Manager struct {
 	fs         fs.Storage
 	feeds      map[string]*feed.Config
 	keys       map[model.Provider]feed.KeyProvider
+	newBuilder builderFactory
 
 	backoffMu sync.Mutex
 	backoffs  map[string]*feedBackoff // per-feed rate-limit backoff state
@@ -73,6 +78,7 @@ func NewUpdater(
 		fs:         fs,
 		feeds:      feeds,
 		keys:       keys,
+		newBuilder: builder.New,
 		backoffs:   make(map[string]*feedBackoff),
 	}, nil
 }
@@ -222,7 +228,7 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 	}
 
 	// Create an updater for this feed type
-	provider, err := builder.New(ctx, info.Provider, keyProvider.Get(), u.downloader)
+	provider, err := u.newBuilder(ctx, info.Provider, keyProvider.Get(), u.downloader)
 	if err != nil {
 		return err
 	}
@@ -338,6 +344,11 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			episodeName = feed.EpisodeName(feedConfig, episode)
 		)
 
+		// Shutting down: leave the remaining episodes untouched
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+
 		// Check whether episode already exists
 		size, err := u.fs.Size(ctx, fmt.Sprintf("%s/%s", feedID, episodeName))
 		if err == nil {
@@ -374,6 +385,13 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			if errors.Is(err, ytdl.ErrTooManyRequests) {
 				logger.Warn("server responded with a 'Too Many Requests' error")
 				return true, nil
+			}
+
+			// The download was interrupted by shutdown, not by a problem with the episode:
+			// don't count an attempt or run the error hooks
+			if ctx.Err() != nil {
+				logger.Info("download interrupted: context cancelled")
+				return false, ctx.Err()
 			}
 
 			// Execute episode download error hooks

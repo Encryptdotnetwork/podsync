@@ -47,6 +47,12 @@ type Config struct {
 // DefaultAdminPort is the port the admin API listens on unless configured otherwise.
 const DefaultAdminPort = 8095
 
+// feedIDRegex matches feed IDs that are safe to use in file names and URLs.
+var feedIDRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// MinAdminTokenLength is the minimum length of the admin API token.
+const MinAdminTokenLength = 32
+
 // Admin is the configuration of the internal administrative API server.
 // Changes to this section require a restart.
 type Admin struct {
@@ -145,16 +151,43 @@ func (c *Config) validate() error {
 		result = multierror.Append(result, errors.Errorf("unknown storage type: %s", c.Storage.Type))
 	}
 
+	if c.Admin.Enabled {
+		switch {
+		case c.Admin.Token == "":
+			result = multierror.Append(result, errors.New("admin.enabled requires a token: set PODSYNC_ADMIN_TOKEN (preferred) or admin.token"))
+		case len(c.Admin.Token) < MinAdminTokenLength:
+			result = multierror.Append(result, errors.Errorf("admin token must be at least %d characters", MinAdminTokenLength))
+		}
+	}
+
 	if len(c.Feeds) == 0 {
 		result = multierror.Append(result, errors.New("at least one feed must be specified"))
 	}
 
 	for id, f := range c.Feeds {
+		if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\`) {
+			result = multierror.Append(result, errors.Errorf("invalid feed ID %q: must not be empty, \".\" or \"..\" or contain path separators", id))
+		} else if !feedIDRegex.MatchString(id) {
+			log.Warnf("feed ID %q may produce unusable file names or URLs; use only letters, digits, '.', '_' and '-'", id)
+		}
 		if f.URL == "" {
 			result = multierror.Append(result, errors.Errorf("URL is required for %q", id))
 		}
 		if err := feed.ValidateFilenameTemplate(f.FilenameTemplate); err != nil {
 			result = multierror.Append(result, errors.Wrapf(err, "invalid filename_template for %q", id))
+		}
+		for _, p := range []struct{ field, pattern string }{
+			{"title", f.Filters.Title},
+			{"not_title", f.Filters.NotTitle},
+			{"description", f.Filters.Description},
+			{"not_description", f.Filters.NotDescription},
+		} {
+			if p.pattern == "" {
+				continue
+			}
+			if _, err := regexp.Compile(p.pattern); err != nil {
+				result = multierror.Append(result, errors.Wrapf(err, "invalid filters.%s for %q", p.field, id))
+			}
 		}
 		if f.Format == model.FormatCustom {
 			if err := feed.ValidateCustomExtension(f.CustomFormat.Extension); err != nil {

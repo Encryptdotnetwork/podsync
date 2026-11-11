@@ -33,42 +33,27 @@ const (
 	highAudioBytesPerSecond = 128000 / 8
 )
 
-type apiKey string
+// apiKeyHeader is the request header YouTube Data API reads the API key from.
+// Sending the key in a header (rather than the `key` URL parameter) keeps it out of
+// the URLs that Go embeds in transport-level error messages and thus out of the logs.
+const apiKeyHeader = "X-Goog-Api-Key"
 
-func (key apiKey) Get() (string, string) {
-	return "key", string(key)
+// apiKeyTransport is an http.RoundTripper that authenticates every request with an API key header.
+type apiKeyTransport struct {
+	key  string
+	base http.RoundTripper
+}
+
+func (t *apiKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// RoundTrippers must not modify the caller's request, so work on a clone
+	req = req.Clone(req.Context())
+	req.Header.Set(apiKeyHeader, t.key)
+	return t.base.RoundTrip(req)
 }
 
 type YouTubeBuilder struct {
 	client     *youtube.Service
-	key        apiKey
 	downloader Downloader
-}
-
-// Cost: 100 units (call: 1, snippet: 99)
-// See https://developers.google.com/youtube/v3/docs/search/list#part
-func (yt *YouTubeBuilder) resolveHandle(ctx context.Context, handle string) (string, error) {
-	req := yt.client.Search.List([]string{"snippet"}).
-		Q(handle).
-		Type("channel").
-		MaxResults(1)
-
-	resp, err := req.Context(ctx).Do(yt.key)
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to search for handle: %s", handle)
-	}
-
-	if len(resp.Items) == 0 {
-		return "", model.ErrNotFound
-	}
-
-	// Get the channel ID from the search result
-	channelID := resp.Items[0].Snippet.ChannelId
-	if channelID == "" {
-		return "", errors.New("channel ID not found in search results")
-	}
-
-	return channelID, nil
 }
 
 // Cost: 5 units (call method: 1, snippet: 2, contentDetails: 2)
@@ -82,17 +67,13 @@ func (yt *YouTubeBuilder) listChannels(ctx context.Context, linkType model.Type,
 	case model.TypeUser:
 		req = req.ForUsername(id)
 	case model.TypeHandle:
-		// Resolve handle to channel ID first
-		channelID, err := yt.resolveHandle(ctx, id)
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to resolve handle: %s", id)
-		}
-		req = req.Id(channelID)
+		// Look the channel up by its exact handle, no search needed
+		req = req.ForHandle("@" + id)
 	default:
 		return nil, errors.New("unsupported link type")
 	}
 
-	resp, err := req.Context(ctx).Do(yt.key)
+	resp, err := req.Context(ctx).Do()
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to query channel")
 	}
@@ -116,7 +97,7 @@ func (yt *YouTubeBuilder) listPlaylists(ctx context.Context, id, channelID strin
 		req = req.ChannelId(channelID)
 	}
 
-	resp, err := req.Context(ctx).Do(yt.key)
+	resp, err := req.Context(ctx).Do()
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to query playlist")
 	}
@@ -143,7 +124,7 @@ func (yt *YouTubeBuilder) listPlaylistItems(ctx context.Context, feed *model.Fee
 		req = req.PageToken(pageToken)
 	}
 
-	resp, err := req.Context(ctx).Do(yt.key)
+	resp, err := req.Context(ctx).Do()
 	if err != nil {
 		return nil, "", errors.Wrap(err, "failed to query playlist items")
 	}
@@ -192,7 +173,7 @@ func (yt *YouTubeBuilder) selectThumbnail(snippet *youtube.ThumbnailDetails, qua
 func (yt *YouTubeBuilder) GetVideoCount(ctx context.Context, info *model.Info) (uint64, error) {
 	switch info.LinkType {
 	case model.TypeChannel, model.TypeUser, model.TypeHandle:
-		// Cost: 3 units for channel/user, 103 units for handle (100 + 3)
+		// Cost: 3 units for channel/user/handle
 		if channel, err := yt.listChannels(ctx, info.LinkType, info.ItemID, "id,statistics"); err != nil {
 			return 0, err
 		} else { // nolint:golint
@@ -212,14 +193,14 @@ func (yt *YouTubeBuilder) GetVideoCount(ctx context.Context, info *model.Info) (
 	}
 }
 
-func (yt *YouTubeBuilder) queryFeed(ctx context.Context, feed *model.Feed, info *model.Info) error {
+func (yt *YouTubeBuilder) queryFeed(ctx context.Context, feed *model.Feed, info *model.Info, customCover bool) error {
 	var (
 		thumbnails *youtube.ThumbnailDetails
 	)
 
 	switch info.LinkType {
 	case model.TypeChannel, model.TypeUser, model.TypeHandle:
-		// Cost: 5 units for channel/user, 105 units for handle (100 + 5)
+		// Cost: 5 units for channel/user/handle
 		channel, err := yt.listChannels(ctx, info.LinkType, info.ItemID, "id,snippet,contentDetails")
 		if err != nil {
 			return err
@@ -270,16 +251,21 @@ func (yt *YouTubeBuilder) queryFeed(ctx context.Context, feed *model.Feed, info 
 		} else { // nolint:golint
 			feed.PubDate = date
 		}
-		metadata, err := yt.downloader.PlaylistMetadata(ctx, feed.ItemURL)
-		if err != nil {
-			return errors.Wrapf(err, "failed to get playlist metadata for %s", feed.ItemURL)
-		}
-		log.Infof("Playlist metadata: %v", metadata)
-		if len(metadata.Thumbnails) > 0 {
-			// best qualtiy thumbnail is the last one
-			feed.CoverArt = metadata.Thumbnails[len(metadata.Thumbnails)-1].Url
-		} else {
-			thumbnails = playlist.Snippet.Thumbnails
+
+		// The cover art lookup (a yt-dlp subprocess) is only a nicety: skip it when a custom cover is configured
+		// and never let its failure abort the update, the API data above is already complete.
+		thumbnails = playlist.Snippet.Thumbnails
+		if !customCover {
+			metadata, err := yt.downloader.PlaylistMetadata(ctx, feed.ItemURL)
+			if err != nil {
+				log.WithError(err).Warnf("failed to get playlist metadata for %s, using API thumbnails", feed.ItemURL)
+			} else {
+				log.Debugf("Playlist metadata: %v", metadata)
+				if len(metadata.Thumbnails) > 0 {
+					// best qualtiy thumbnail is the last one
+					feed.CoverArt = metadata.Thumbnails[len(metadata.Thumbnails)-1].Url
+				}
+			}
 		}
 
 	default:
@@ -342,7 +328,7 @@ func (yt *YouTubeBuilder) queryVideoDescriptions(ctx context.Context, playlist m
 
 	// Loop in each slices of 50 (or less) IDs and query their description
 	for _, idsI := range idsList {
-		req, err := yt.client.Videos.List([]string{"id", "snippet", "contentDetails"}).Id(idsI).Context(ctx).Do(yt.key)
+		req, err := yt.client.Videos.List([]string{"id", "snippet", "contentDetails"}).Id(idsI).Context(ctx).Do()
 		if err != nil {
 			return errors.Wrap(err, "failed to query video descriptions")
 		}
@@ -363,7 +349,13 @@ func (yt *YouTubeBuilder) queryVideoDescriptions(ctx context.Context, playlist m
 			// Parse date added to playlist / publication date
 			dateStr := ""
 			playlistItem, ok := playlist[video.Id]
-			if ok && playlistItem.PublishedAt > snippet.PublishedAt {
+			if !ok {
+				// The API returned a video that was not requested, there is no position to order it by
+				log.Debugf("Skipping video %s: not found in the playlist items", video.Id)
+				continue
+			}
+
+			if playlistItem.PublishedAt > snippet.PublishedAt {
 				// Use playlist item publish date if it's more recent
 				dateStr = playlistItem.PublishedAt
 			} else {
@@ -488,7 +480,7 @@ func (yt *YouTubeBuilder) Build(ctx context.Context, cfg *feed.Config) (*model.F
 	}
 
 	// Query general information about feed (title, description, lang, etc)
-	if err := yt.queryFeed(ctx, _feed, &info); err != nil {
+	if err := yt.queryFeed(ctx, _feed, &info, cfg.Custom.CoverArt != ""); err != nil {
 		return nil, err
 	}
 
@@ -516,10 +508,17 @@ func NewYouTubeBuilder(key string, ytdlp Downloader) (*YouTubeBuilder, error) {
 		return nil, errors.New("empty YouTube API key")
 	}
 
-	yt, err := youtube.NewService(context.Background(), option.WithHTTPClient(&http.Client{}))
+	return newYouTubeBuilder(key, http.DefaultTransport, ytdlp)
+}
+
+// newYouTubeBuilder creates a builder that sends requests through the given base transport.
+func newYouTubeBuilder(key string, base http.RoundTripper, ytdlp Downloader) (*YouTubeBuilder, error) {
+	client := &http.Client{Transport: &apiKeyTransport{key: key, base: base}}
+
+	yt, err := youtube.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create youtube client")
 	}
 
-	return &YouTubeBuilder{client: yt, key: apiKey(key), downloader: ytdlp}, nil
+	return &YouTubeBuilder{client: yt, downloader: ytdlp}, nil
 }
