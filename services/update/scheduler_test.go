@@ -33,6 +33,13 @@ func newTestScheduler(t *testing.T, feeds map[string]*feed.Config) *Scheduler {
 		cron:    cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger))),
 		entries: make(map[string]cron.EntryID),
 		queue:   newUpdateQueue(),
+
+		statuses:   make(map[string]*FeedStatus),
+		lastManual: make(map[string]time.Time),
+		currentFeeds: func() map[string]*feed.Config {
+			return feeds
+		},
+		now: time.Now,
 	}
 }
 
@@ -150,11 +157,11 @@ func TestSchedulerProcessUpdateDropsStaleIDs(t *testing.T) {
 	// "GONE" simulates an ID queued before a reload removed the feed. It must
 	// be dropped without touching the manager — whose dependencies are nil here
 	// and would panic if an update were attempted with no resolvable config.
-	s.processUpdate(ctx, "GONE")
+	s.processUpdate(ctx, "GONE", false)
 
 	// A resolvable ID runs through the manager using the current feeds map
 	// (the nil-keyed manager fails the update gracefully, which is logged)
-	s.processUpdate(ctx, "A")
+	s.processUpdate(ctx, "A", false)
 }
 
 // A panic inside a provider must not take down the daemon: it is recovered,
@@ -185,8 +192,8 @@ func TestSchedulerProcessUpdateRecoversFromPanic(t *testing.T) {
 	}
 	s.manager = manager
 
-	require.NotPanics(t, func() { s.processUpdate(ctx, "A") })
-	require.NotPanics(t, func() { s.processUpdate(ctx, "A") })
+	require.NotPanics(t, func() { s.processUpdate(ctx, "A", false) })
+	require.NotPanics(t, func() { s.processUpdate(ctx, "A", false) })
 	assert.Equal(t, 2, calls, "the update must be attempted again after a recovered panic")
 }
 
