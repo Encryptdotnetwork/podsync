@@ -39,6 +39,15 @@ func (t *TwitchBuilder) Build(_ctx context.Context, cfg *feed.Config) (*model.Fe
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to get user: %s", info.ItemID)
 		}
+		if len(users.Data.Users) == 0 {
+			// helix reports many API failures (bad credentials, 4xx/5xx) with a nil
+			// error and the details in the response, so tell those apart from a
+			// genuinely unknown user
+			if respErr := helixResponseError(&users.ResponseCommon); respErr != nil {
+				return nil, errors.Wrapf(respErr, "failed to get user: %s", info.ItemID)
+			}
+			return nil, errors.Wrapf(model.ErrNotFound, "twitch user %q", info.ItemID)
+		}
 		user := users.Data.Users[0]
 
 		feed.Title = user.DisplayName
@@ -50,9 +59,17 @@ func (t *TwitchBuilder) Build(_ctx context.Context, cfg *feed.Config) (*model.Fe
 
 		isStreaming := false
 		streamID := ""
-		streams, _ := t.client.GetStreams(&helix.StreamsParams{
+		streams, err := t.client.GetStreams(&helix.StreamsParams{
 			UserIDs: []string{user.ID},
 		})
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to get streams for user: %s", info.ItemID)
+		}
+		// A failed lookup must not be mistaken for "not streaming": that would
+		// download the archive of a stream that is still in progress
+		if respErr := helixResponseError(&streams.ResponseCommon); respErr != nil {
+			return nil, errors.Wrapf(respErr, "failed to get streams for user: %s", info.ItemID)
+		}
 		if len(streams.Data.Streams) > 0 {
 			isStreaming = true
 			streamID = streams.Data.Streams[0].ID
@@ -110,6 +127,26 @@ func (t *TwitchBuilder) Build(_ctx context.Context, cfg *feed.Config) (*model.Fe
 	}
 
 	return nil, errors.New("unsupported feed type")
+}
+
+// helixResponseError returns an error when a helix response carries an API
+// error message or a non-2xx status, which the client reports without an error.
+func helixResponseError(rc *helix.ResponseCommon) error {
+	if rc.ErrorMessage == "" && rc.Error == "" && (rc.StatusCode == 0 || (rc.StatusCode >= 200 && rc.StatusCode < 300)) {
+		return nil
+	}
+
+	status := rc.StatusCode
+	if status == 0 {
+		status = rc.ErrorStatus
+	}
+
+	message := rc.ErrorMessage
+	if message == "" {
+		message = rc.Error
+	}
+
+	return errors.Errorf("twitch API error: status %d: %s", status, message)
 }
 
 func NewTwitchBuilder(clientIDSecret string) (*TwitchBuilder, error) {
