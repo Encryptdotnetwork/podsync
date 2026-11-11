@@ -47,6 +47,9 @@ type Config struct {
 // DefaultAdminPort is the port the admin API listens on unless configured otherwise.
 const DefaultAdminPort = 8095
 
+// MinAdminTokenLength is the minimum length of the admin API token.
+const MinAdminTokenLength = 32
+
 // Admin is the configuration of the internal administrative API server.
 // Changes to this section require a restart.
 type Admin struct {
@@ -143,6 +146,15 @@ func (c *Config) validate() error {
 		}
 	default:
 		result = multierror.Append(result, errors.Errorf("unknown storage type: %s", c.Storage.Type))
+	}
+
+	if c.Admin.Enabled {
+		switch {
+		case c.Admin.Token == "":
+			result = multierror.Append(result, errors.New("admin.enabled requires a token: set PODSYNC_ADMIN_TOKEN (preferred) or admin.token"))
+		case len(c.Admin.Token) < MinAdminTokenLength:
+			result = multierror.Append(result, errors.Errorf("admin token must be at least %d characters", MinAdminTokenLength))
+		}
 	}
 
 	if len(c.Feeds) == 0 {
