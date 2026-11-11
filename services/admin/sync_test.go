@@ -277,7 +277,7 @@ func TestAdminRoutesAvoidPublicRouterPatterns(t *testing.T) {
 	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, &fakeSyncer{})
 
 	routes := env.srv.Routes()
-	require.GreaterOrEqual(t, len(routes), 12)
+	require.GreaterOrEqual(t, len(routes), 15)
 
 	for _, pattern := range routes {
 		_, path := concretePath(pattern)

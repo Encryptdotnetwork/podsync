@@ -211,8 +211,25 @@ func main() {
 		return // S3 content is hosted externally
 	}
 
+	// The admin API is served either on its own listener (the default) or,
+	// with admin.mount_on_server, under /admin/ on the web server's listener
+	var (
+		adminSrv *admin.Server
+		webOpts  []web.Option
+	)
+	if cfg.Admin.Enabled {
+		adminSrv = admin.New(cfg.Admin, store, func() error {
+			_, err := store.Reload()
+			return err
+		}, scheduler)
+
+		if cfg.Admin.MountOnServer {
+			webOpts = append(webOpts, web.WithAdminHandler(adminSrv.Handler))
+		}
+	}
+
 	// Run web server
-	srv := web.New(cfg.Server, storage, database)
+	srv := web.New(cfg.Server, storage, database, webOpts...)
 
 	group.Go(func() error {
 		log.Infof("running listener at %s", srv.Addr)
@@ -223,13 +240,9 @@ func main() {
 		}
 	})
 
-	// Run internal admin API server (config management and hot reload)
-	if cfg.Admin.Enabled {
-		adminSrv := admin.New(cfg.Admin, store, func() error {
-			_, err := store.Reload()
-			return err
-		}, scheduler)
-
+	// Run the internal admin API listener (config management, hot reload and
+	// manual sync) unless it is mounted on the web server
+	if adminSrv != nil && !cfg.Admin.MountOnServer {
 		group.Go(func() error {
 			log.Infof("running admin API at %s", adminSrv.Addr)
 			return adminSrv.ListenAndServe()

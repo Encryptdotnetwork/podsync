@@ -87,6 +87,13 @@ func New(cfg config.Admin, store *config.Store, reload func() error, syncer Sync
 	handle("POST /admin/sync", srv.requireAuth(srv.handleSyncAll))
 	handle("GET /admin/sync", srv.requireAuth(srv.handleSyncStatus))
 
+	// The page and its assets are public (no secrets in them); the token is
+	// typed in the browser and sent with each API call. "{$}" matches only
+	// "/admin/" itself.
+	handle("GET /admin/{$}", staticHandler("index.html", "text/html; charset=utf-8"))
+	handle("GET /admin/admin.js", staticHandler("admin.js", "text/javascript; charset=utf-8"))
+	handle("GET /admin/admin.css", staticHandler("admin.css", "text/css; charset=utf-8"))
+
 	srv.Addr = fmt.Sprintf("%s:%d", bindAddress, port)
 	srv.Handler = mux
 
