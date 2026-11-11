@@ -13,6 +13,7 @@
     queued: 'Queued',
     syncing: 'Syncing',
     completed: 'Completed',
+    completed_with_errors: 'Completed with errors',
     no_new_episodes: 'No new episodes',
     failed: 'Failed',
     rate_limited: 'Rate limited'
@@ -150,7 +151,11 @@
 
     cell(row, feed.id, 'feed-id');
 
-    var stateCell = cell(row, STATE_LABELS[feed.state] || feed.state, 'state state-' + feed.state);
+    var stateText = STATE_LABELS[feed.state] || feed.state;
+    if (feed.state === 'completed_with_errors') {
+      stateText += ': ' + feed.failed + ' failed, ' + feed.downloaded + ' downloaded';
+    }
+    var stateCell = cell(row, stateText, 'state state-' + feed.state);
     stateCell.setAttribute('data-state', feed.state);
 
     cell(row, feed.trigger === 'manual' ? 'Sync now' : (feed.trigger === 'scheduled' ? 'Schedule' : ''), 'muted');

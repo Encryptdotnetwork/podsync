@@ -72,6 +72,9 @@ func TestPageAssetsAreSelfContainedAndSafe(t *testing.T) {
 		assert.NotContains(t, js, banned)
 	}
 	assert.Contains(t, js, "textContent")
+	assert.Contains(t, js, "Completed with errors")
+	assert.Contains(t, js, "completed_with_errors")
+	assert.Contains(t, css, ".state-completed_with_errors")
 	assert.Contains(t, js, "sessionStorage")
 	assert.Contains(t, js, "Authorization")
 }

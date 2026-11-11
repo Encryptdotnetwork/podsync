@@ -162,7 +162,8 @@ tr:last-child td {
 
 .state-queued,
 .state-syncing,
-.state-rate_limited {
+.state-rate_limited,
+.state-completed_with_errors {
   color: var(--warn);
 }
 

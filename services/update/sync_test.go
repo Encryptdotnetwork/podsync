@@ -104,6 +104,8 @@ type gateDownloader struct {
 	mu    sync.Mutex
 	gates map[string]*gate
 	calls []string
+	// fail maps "feed/episode" to a download error; set before Run starts
+	fail map[string]error
 }
 
 func (d *gateDownloader) addGate(feedID, episodeID string) *gate {
@@ -130,6 +132,9 @@ func (d *gateDownloader) Download(ctx context.Context, cfg *feed.Config, episode
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+	if err := d.fail[key]; err != nil {
+		return nil, err
 	}
 	return io.NopCloser(strings.NewReader("media-" + key)), nil
 }
@@ -188,7 +193,7 @@ func newSyncEnv(t *testing.T, feedIDs ...string) *syncEnv {
 		db:       database,
 		dataDir:  dataDir,
 		provider: &multiBuilder{feeds: map[string]*model.Feed{}, errs: map[string]error{}},
-		dl:       &gateDownloader{gates: map[string]*gate{}},
+		dl:       &gateDownloader{gates: map[string]*gate{}, fail: map[string]error{}},
 		clock:    &fakeClock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)},
 	}
 
@@ -817,4 +822,40 @@ func TestScheduledTickDuringRunIsDropped(t *testing.T) {
 			assert.Equal(t, []string{"A", "A"}, env.provider.built())
 		})
 	}
+}
+
+// A run whose update succeeded but whose episode downloads partly or wholly
+// failed is "completed with errors", not "completed".
+func TestStatusCompletedWithErrors(t *testing.T) {
+	t.Run("one failed, one downloaded", func(t *testing.T) {
+		env := newSyncEnv(t, "A")
+		env.provider.set("A", syncEpisode("a1", 2), syncEpisode("a2", 1))
+		env.dl.fail["A/a2"] = errors.New("video unavailable")
+		env.run()
+
+		_, err := env.s.SyncNow("A")
+		require.NoError(t, err)
+		env.waitIdle()
+
+		st := env.status("A")
+		assert.Equal(t, StateCompletedWithErrors, st.State)
+		assert.Equal(t, 1, st.Failed)
+		assert.Equal(t, 1, st.Downloaded)
+		assert.Empty(t, st.Error)
+	})
+
+	t.Run("only failures", func(t *testing.T) {
+		env := newSyncEnv(t, "A")
+		env.provider.set("A", syncEpisode("a1", 1))
+		env.dl.fail["A/a1"] = errors.New("video unavailable")
+		env.run()
+
+		env.s.scheduleEnqueue("A")
+		env.waitIdle()
+
+		st := env.status("A")
+		assert.Equal(t, StateCompletedWithErrors, st.State)
+		assert.Equal(t, 1, st.Failed)
+		assert.Zero(t, st.Downloaded)
+	})
 }

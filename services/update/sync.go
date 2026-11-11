@@ -17,8 +17,12 @@ const (
 	StateQueued SyncState = "queued"
 	// StateSyncing: an update is running now.
 	StateSyncing SyncState = "syncing"
-	// StateCompleted: the last update finished and found or changed something.
+	// StateCompleted: the last update finished, found or changed something,
+	// and no episode download failed.
 	StateCompleted SyncState = "completed"
+	// StateCompletedWithErrors: the update itself succeeded but at least one
+	// episode download failed (other episodes may have been downloaded).
+	StateCompletedWithErrors SyncState = "completed_with_errors"
 	// StateNoNewEpisodes: the last update finished without new episodes,
 	// downloads or failures.
 	StateNoNewEpisodes SyncState = "no_new_episodes"
@@ -329,7 +333,9 @@ func (s *Scheduler) recordFinish(feedID string, manual bool, res Result, err err
 			st.Trigger = TriggerManual
 		}
 		st.QueuedAt = now
-	case res.Discovered == 0 && res.Downloaded == 0 && res.Failed == 0:
+	case res.Failed > 0:
+		st.State = StateCompletedWithErrors
+	case res.Discovered == 0 && res.Downloaded == 0:
 		st.State = StateNoNewEpisodes
 	default:
 		st.State = StateCompleted

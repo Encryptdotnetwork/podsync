@@ -357,7 +357,7 @@ All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy
 - `POST /admin/reload` - Re-read config.toml from disk (after hand edits)
 - `POST /admin/feeds/{id}/sync` - Queue a manual update of one feed: 202 (queued or already queued), 404 unknown feed, 429 with `Retry-After` while the feed is rate limited or was manually synced less than 30 seconds ago
 - `POST /admin/sync` - Queue every feed ("Sync all"): 202 with `queued`/`refused` lists, 429 if all were refused
-- `GET /admin/sync` - Per-feed status: `idle`, `queued`, `syncing`, `completed`, `no_new_episodes`, `failed` (fixed error category only, never raw error text), `rate_limited` (with `retry_after`); `busy` is true while anything is queued or syncing
+- `GET /admin/sync` - Per-feed status: `idle`, `queued`, `syncing`, `completed` (nothing failed), `completed_with_errors` (the update succeeded but at least one episode download failed), `no_new_episodes`, `failed` (fixed error category only, never raw error text), `rate_limited` (with `retry_after`); `busy` is true while anything is queued or syncing
 - `GET /admin/` (plus `admin.js`, `admin.css`) - The embedded admin page: unauthenticated static files served with CSP `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'`. The user types the token, it lives in `sessionStorage`, and content is rendered with `textContent` only. It shows the sync table with "Sync now" and "Sync all", polling every 2 seconds while anything is queued or syncing
 
 ### Semantics
