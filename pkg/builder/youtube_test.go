@@ -266,3 +266,23 @@ func TestHandleNotFound(t *testing.T) {
 	require.True(t, strings.HasSuffix(reqs[0].URL.Path, "/channels"))
 	require.Equal(t, "@nonexistent", reqs[0].URL.Query().Get("forHandle"))
 }
+
+func TestBuildSkipsVideosMissingFromPlaylist(t *testing.T) {
+	yt, _ := newTestBuilder(t, func(req *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(req.URL.Path, "/videos") {
+			// The API also returns a video that is not part of the playlist items
+			return jsonResponse(req, `{"items": [
+				{"id": "vid_unknown", "snippet": {"title": "Unknown", "publishedAt": "2020-01-10T00:00:00Z",
+					"thumbnails": {"default": {"url": "https://img.example/unknown.jpg"}}}, "contentDetails": {"duration": "PT1M"}},
+				{"id": "vid1", "snippet": {"title": "Video 1", "publishedAt": "2020-01-15T00:00:00Z",
+					"thumbnails": {"default": {"url": "https://img.example/vid1.jpg"}}}, "contentDetails": {"duration": "PT1M"}}]}`)
+		}
+
+		return playlistAPIHandler(req)
+	}, &fakeDownloader{})
+
+	f, err := yt.Build(context.Background(), &feed.Config{URL: "https://www.youtube.com/playlist?list=PL_test"})
+	require.NoError(t, err)
+	require.Len(t, f.Episodes, 1)
+	require.Equal(t, "vid1", f.Episodes[0].ID)
+}

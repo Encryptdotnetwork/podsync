@@ -349,7 +349,13 @@ func (yt *YouTubeBuilder) queryVideoDescriptions(ctx context.Context, playlist m
 			// Parse date added to playlist / publication date
 			dateStr := ""
 			playlistItem, ok := playlist[video.Id]
-			if ok && playlistItem.PublishedAt > snippet.PublishedAt {
+			if !ok {
+				// The API returned a video that was not requested, there is no position to order it by
+				log.Debugf("Skipping video %s: not found in the playlist items", video.Id)
+				continue
+			}
+
+			if playlistItem.PublishedAt > snippet.PublishedAt {
 				// Use playlist item publish date if it's more recent
 				dateStr = playlistItem.PublishedAt
 			} else {
