@@ -216,8 +216,14 @@ func (s *Scheduler) snapshotLocked(feedID string) FeedStatus {
 	}
 
 	snap := *st
+	queued, manual := s.queue.pending(feedID)
 	if snap.State == StateSyncing {
-		snap.Pending, _ = s.queue.pending(feedID)
+		snap.Pending = queued
+	} else if queued {
+		// A finished run may still have a follow-up waiting to be popped.
+		// Keep the snapshot busy so clients do not stop polling between runs.
+		snap.State = StateQueued
+		snap.Trigger = triggerName(manual)
 	}
 	return snap
 }

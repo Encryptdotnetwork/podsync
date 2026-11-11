@@ -137,6 +137,7 @@ func newUpdaterEnv(t *testing.T, episodes ...*model.Episode) *updaterEnv {
 }
 
 func testProviderFeed(episodes ...*model.Episode) *model.Feed {
+	// A zero publication date makes the RSS library fall back to the wall clock.
 	return &model.Feed{
 		ItemID:      "UCtest",
 		Provider:    model.ProviderYoutube,
@@ -146,6 +147,7 @@ func testProviderFeed(episodes ...*model.Episode) *model.Feed {
 		Title:       "Test feed",
 		Description: "Test feed description",
 		ItemURL:     "https://youtube.com/channel/UCtest",
+		PubDate:     time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		Episodes:    episodes,
 	}
 }

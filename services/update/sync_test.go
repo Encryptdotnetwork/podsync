@@ -459,6 +459,13 @@ func TestSyncNowDuringRunQueuesOneFollowUp(t *testing.T) {
 	env := newSyncEnv(t, "A")
 	env.provider.set("A", syncEpisode("a1", 2), syncEpisode("a2", 1))
 	g := env.dl.addGate("A", "a1")
+	finished := make(chan SyncStatus, 1)
+	env.s.afterRun = func(string, bool, Result, error) {
+		select {
+		case finished <- env.s.Status():
+		default:
+		}
+	}
 
 	// The running update is itself manual, so it never yields
 	_, err := env.s.SyncNow("A")
@@ -476,6 +483,14 @@ func TestSyncNowDuringRunQueuesOneFollowUp(t *testing.T) {
 	assert.Equal(t, 1, env.s.queue.len())
 
 	close(g.release)
+	select {
+	case betweenRuns := <-finished:
+		assert.True(t, betweenRuns.Busy, "a queued follow-up must keep clients polling")
+		require.Len(t, betweenRuns.Feeds, 1)
+		assert.Equal(t, StateQueued, betweenRuns.Feeds[0].State)
+	case <-time.After(5 * time.Second):
+		t.Fatal("first run did not finish")
+	}
 	env.waitIdle()
 
 	assert.Equal(t, []string{"A", "A"}, env.provider.built())
