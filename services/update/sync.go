@@ -153,13 +153,7 @@ func (s *Scheduler) SyncNow(feedID string) (FeedStatus, error) {
 func (s *Scheduler) SyncAll() (SyncAllResult, error) {
 	var result SyncAllResult
 
-	ids := make([]string, 0)
-	for id := range s.currentFeeds() {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	for _, id := range ids {
+	for _, id := range s.sortedFeedIDs() {
 		_, err := s.SyncNow(id)
 
 		var refused *RefusedError
@@ -181,11 +175,7 @@ func (s *Scheduler) SyncAll() (SyncAllResult, error) {
 // Status returns a snapshot of every configured feed, sorted by ID. Feeds that
 // have not run yet are reported as idle.
 func (s *Scheduler) Status() SyncStatus {
-	ids := make([]string, 0)
-	for id := range s.currentFeeds() {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	ids := s.sortedFeedIDs()
 
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
@@ -199,6 +189,18 @@ func (s *Scheduler) Status() SyncStatus {
 		status.Feeds = append(status.Feeds, snap)
 	}
 	return status
+}
+
+// sortedFeedIDs returns the configured feed IDs in order.
+func (s *Scheduler) sortedFeedIDs() []string {
+	feeds := s.currentFeeds()
+
+	ids := make([]string, 0, len(feeds))
+	for id := range feeds {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // The helpers below require s.statusMu to be held.

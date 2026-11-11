@@ -565,8 +565,9 @@ func TestManualRunDoesNotChangeCronNext(t *testing.T) {
 	env.run()
 
 	nextTimes := func() []time.Time {
-		var out []time.Time
-		for _, entry := range env.s.cron.Entries() {
+		entries := env.s.cron.Entries()
+		out := make([]time.Time, 0, len(entries))
+		for _, entry := range entries {
 			out = append(out, entry.Next)
 		}
 		return out
@@ -707,8 +708,9 @@ func (s *Scheduler) drainForTest(t *testing.T) {
 func TestStatusSortedAndComplete(t *testing.T) {
 	env := newSyncEnv(t, "C", "A", "B")
 
-	var ids []string
-	for _, st := range env.s.Status().Feeds {
+	feeds := env.s.Status().Feeds
+	ids := make([]string, 0, len(feeds))
+	for _, st := range feeds {
 		ids = append(ids, st.ID)
 		assert.Equal(t, StateIdle, st.State)
 	}
