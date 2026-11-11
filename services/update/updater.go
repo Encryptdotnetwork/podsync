@@ -344,6 +344,11 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			episodeName = feed.EpisodeName(feedConfig, episode)
 		)
 
+		// Shutting down: leave the remaining episodes untouched
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+
 		// Check whether episode already exists
 		size, err := u.fs.Size(ctx, fmt.Sprintf("%s/%s", feedID, episodeName))
 		if err == nil {
@@ -380,6 +385,13 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			if errors.Is(err, ytdl.ErrTooManyRequests) {
 				logger.Warn("server responded with a 'Too Many Requests' error")
 				return true, nil
+			}
+
+			// The download was interrupted by shutdown, not by a problem with the episode:
+			// don't count an attempt or run the error hooks
+			if ctx.Err() != nil {
+				logger.Info("download interrupted: context cancelled")
+				return false, ctx.Err()
 			}
 
 			// Execute episode download error hooks

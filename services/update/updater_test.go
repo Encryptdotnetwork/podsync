@@ -52,10 +52,15 @@ func (b *fakeBuilder) Build(context.Context, *feed.Config) (*model.Feed, error) 
 type fakeDownloader struct {
 	errs  map[string]error
 	calls []string
+	// onDownload, when set, runs at the start of every Download call
+	onDownload func()
 }
 
 func (d *fakeDownloader) Download(_ context.Context, _ *feed.Config, episode *model.Episode) (io.ReadCloser, error) {
 	d.calls = append(d.calls, episode.ID)
+	if d.onDownload != nil {
+		d.onDownload()
+	}
 	if err := d.errs[episode.ID]; err != nil {
 		return nil, err
 	}
@@ -401,4 +406,47 @@ func TestUpdateStopsRetryingAfterMaxAttempts(t *testing.T) {
 
 	require.NoError(t, env.update(t))
 	assert.Len(t, env.downloader.calls, maxDownloadAttempts, "no attempt beyond the cap")
+}
+
+// Cancelling the context (daemon shutdown) mid-download must not charge the
+// in-flight episode or any later one with a failed attempt.
+func TestUpdateCancelledBatchChargesNoRetries(t *testing.T) {
+	env := newUpdaterEnv(t,
+		testEpisode("e1", time.Hour),
+		testEpisode("e2", 2*time.Hour),
+		testEpisode("e3", 3*time.Hour),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	env.downloader.onDownload = cancel
+	for _, id := range []string{"e1", "e2", "e3"} {
+		env.downloader.errs[id] = errors.New("signal: killed")
+	}
+
+	err := env.manager.Update(ctx, env.cfg)
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled), "got %v", err)
+	assert.Len(t, env.downloader.calls, 1)
+
+	episodes := env.episodes(t)
+	require.Len(t, episodes, 3)
+	for id, episode := range episodes {
+		assert.Equal(t, model.EpisodeNew, episode.Status, id)
+		assert.Zero(t, episode.Retries, id)
+	}
+}
+
+// A failure while the context is still live keeps being recorded.
+func TestUpdateFailureWithLiveContextStillCounts(t *testing.T) {
+	env := newUpdaterEnv(t, testEpisode("e1", time.Hour))
+	env.downloader.errs["e1"] = errors.New("video unavailable")
+
+	require.NoError(t, env.update(t))
+
+	episode := env.episodes(t)["e1"]
+	assert.Equal(t, model.EpisodeError, episode.Status)
+	assert.Equal(t, 1, episode.Retries)
 }
