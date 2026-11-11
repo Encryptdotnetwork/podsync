@@ -500,6 +500,145 @@ no_index = true
 	})
 }
 
+func TestAdminTokenValidation(t *testing.T) {
+	const feeds = `
+[server]
+data_dir = "/data"
+
+[feeds]
+  [feeds.A]
+  url = "https://youtube.com/watch?v=ygIUF678y40"
+`
+	const longToken = "0123456789abcdef0123456789abcdef"
+
+	load := func(t *testing.T, admin string) (*Config, error) {
+		t.Helper()
+
+		path := setup(t, admin+feeds)
+		defer os.Remove(path)
+
+		return LoadConfig(path)
+	}
+
+	t.Run("enabled without token fails", func(t *testing.T) {
+		t.Setenv("PODSYNC_ADMIN_TOKEN", "")
+		require.NoError(t, os.Unsetenv("PODSYNC_ADMIN_TOKEN"))
+
+		_, err := load(t, "[admin]\nenabled = true\n")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "admin.enabled requires a token")
+	})
+
+	t.Run("enabled with short token fails without leaking it", func(t *testing.T) {
+		const short = "supersecret-short"
+		t.Setenv("PODSYNC_ADMIN_TOKEN", "")
+		require.NoError(t, os.Unsetenv("PODSYNC_ADMIN_TOKEN"))
+
+		_, err := load(t, "[admin]\nenabled = true\ntoken = \""+short+"\"\n")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "at least 32 characters")
+		assert.NotContains(t, err.Error(), short)
+	})
+
+	t.Run("enabled with long token passes", func(t *testing.T) {
+		t.Setenv("PODSYNC_ADMIN_TOKEN", "")
+		require.NoError(t, os.Unsetenv("PODSYNC_ADMIN_TOKEN"))
+
+		cfg, err := load(t, "[admin]\nenabled = true\ntoken = \""+longToken+"\"\n")
+		require.NoError(t, err)
+		assert.Equal(t, longToken, cfg.Admin.Token)
+	})
+
+	t.Run("token from environment passes", func(t *testing.T) {
+		t.Setenv("PODSYNC_ADMIN_TOKEN", longToken)
+
+		cfg, err := load(t, "[admin]\nenabled = true\n")
+		require.NoError(t, err)
+		assert.Equal(t, longToken, cfg.Admin.Token)
+	})
+
+	t.Run("short token from environment fails without leaking it", func(t *testing.T) {
+		const short = "env-secret-short"
+		t.Setenv("PODSYNC_ADMIN_TOKEN", short)
+
+		_, err := load(t, "[admin]\nenabled = true\n")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), short)
+	})
+
+	t.Run("disabled without token passes", func(t *testing.T) {
+		t.Setenv("PODSYNC_ADMIN_TOKEN", "")
+		require.NoError(t, os.Unsetenv("PODSYNC_ADMIN_TOKEN"))
+
+		_, err := load(t, "")
+		require.NoError(t, err)
+	})
+}
+
+func TestFilterRegexpValidation(t *testing.T) {
+	t.Run("rejects invalid pattern naming feed and field", func(t *testing.T) {
+		const file = `
+[server]
+data_dir = "/data"
+
+[feeds]
+  [feeds.ID1]
+  url = "https://youtube.com/watch?v=ygIUF678y40"
+  filters = { not_title = "(unclosed" }
+`
+		path := setup(t, file)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `invalid filters.not_title for "ID1"`)
+	})
+
+	t.Run("accepts valid patterns", func(t *testing.T) {
+		const file = `
+[server]
+data_dir = "/data"
+
+[feeds]
+  [feeds.ID1]
+  url = "https://youtube.com/watch?v=ygIUF678y40"
+  filters = { title = "(?i)(tutorial|guide)", not_title = "^live", description = "a.*b", not_description = "\\bspam\\b" }
+`
+		path := setup(t, file)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		assert.NoError(t, err)
+	})
+}
+
+func TestFeedIDValidation(t *testing.T) {
+	load := func(t *testing.T, key string) error {
+		t.Helper()
+
+		file := "[server]\ndata_dir = \"/data\"\n\n[feeds]\n  [feeds." + key + "]\n  url = \"https://youtube.com/watch?v=ygIUF678y40\"\n"
+		path := setup(t, file)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		return err
+	}
+
+	for _, key := range []string{`"../../x"`, `"a/b"`, `"a\\b"`, `".."`, `"."`, `""`} {
+		t.Run("rejects "+key, func(t *testing.T) {
+			err := load(t, key)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid feed ID")
+		})
+	}
+
+	for _, key := range []string{`ID1`, `WesRoth`, `"my_feed-2.0"`, `"with space"`} {
+		t.Run("accepts "+key, func(t *testing.T) {
+			assert.NoError(t, load(t, key))
+		})
+	}
+}
+
 func setup(t *testing.T, file string) string {
 	t.Helper()
 
