@@ -172,7 +172,8 @@ func (s *Scheduler) safeUpdate(ctx context.Context, feedConfig *feed.Config) (er
 		}
 	}()
 
-	return s.manager.Update(ctx, feedConfig)
+	_, err = s.manager.Update(ctx, feedConfig)
+	return err
 }
 
 // applyReload swaps in a new configuration: it rebuilds the key providers and

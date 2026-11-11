@@ -165,7 +165,8 @@ func testEpisode(id string, age time.Duration) *model.Episode {
 
 func (e *updaterEnv) update(t *testing.T) error {
 	t.Helper()
-	return e.manager.Update(context.Background(), e.cfg)
+	_, err := e.manager.Update(context.Background(), e.cfg)
+	return err
 }
 
 // episodes returns the stored episodes of the test feed keyed by ID.
@@ -425,7 +426,7 @@ func TestUpdateCancelledBatchChargesNoRetries(t *testing.T) {
 		env.downloader.errs[id] = errors.New("signal: killed")
 	}
 
-	err := env.manager.Update(ctx, env.cfg)
+	_, err := env.manager.Update(ctx, env.cfg)
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, context.Canceled), "got %v", err)
@@ -449,4 +450,110 @@ func TestUpdateFailureWithLiveContextStillCounts(t *testing.T) {
 	episode := env.episodes(t)["e1"]
 	assert.Equal(t, model.EpisodeError, episode.Status)
 	assert.Equal(t, 1, episode.Retries)
+}
+
+func TestUpdateResultCounts(t *testing.T) {
+	env := newUpdaterEnv(t, testEpisode("e1", time.Hour), testEpisode("e2", 2*time.Hour))
+	env.downloader.errs["e2"] = errors.New("video unavailable")
+
+	result, err := env.manager.Update(context.Background(), env.cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Discovered)
+	assert.Equal(t, 1, result.Downloaded)
+	assert.Equal(t, 1, result.Failed)
+	assert.False(t, result.SkippedBackoff || result.RateLimited || result.Interrupted)
+	assert.Empty(t, result.ErrorCategory)
+
+	// Nothing new: e2 is retried (and fails again), nothing is discovered
+	result, err = env.manager.Update(context.Background(), env.cfg)
+	require.NoError(t, err)
+	assert.Equal(t, Result{Failed: 1}, result)
+
+	// One new episode is discovered and downloaded
+	env.provider.feed = testProviderFeed(
+		testEpisode("e3", 30*time.Minute), testEpisode("e1", time.Hour), testEpisode("e2", 2*time.Hour))
+	result, err = env.manager.Update(context.Background(), env.cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Discovered)
+	assert.Equal(t, 1, result.Downloaded)
+}
+
+func TestUpdateResultErrorCategories(t *testing.T) {
+	env := newUpdaterEnv(t, testEpisode("e1", time.Hour))
+	env.provider.err = errors.New("boom key=SECRET")
+
+	result, err := env.manager.Update(context.Background(), env.cfg)
+	require.Error(t, err)
+	assert.Equal(t, ErrCategorySource, result.ErrorCategory)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	env.provider.err = nil
+	env.downloader.onDownload = cancel
+	env.downloader.errs["e1"] = errors.New("signal: killed")
+
+	result, err = env.manager.Update(ctx, env.cfg)
+	require.Error(t, err)
+	assert.Equal(t, ErrCategoryCancelled, result.ErrorCategory)
+}
+
+func TestUpdateResultRateLimit(t *testing.T) {
+	env := newUpdaterEnv(t, testEpisode("e1", time.Hour), testEpisode("e2", 2*time.Hour))
+	env.downloader.errs["e1"] = ytdl.ErrTooManyRequests
+
+	before := time.Now()
+	result, err := env.manager.Update(context.Background(), env.cfg)
+	require.NoError(t, err)
+	assert.True(t, result.RateLimited)
+	assert.False(t, result.SkippedBackoff)
+	assert.WithinDuration(t, before.Add(rateLimitBackoffInitial), result.RetryAfter, time.Minute)
+
+	// The next call is refused up front and reports the same retry time
+	skipped, err := env.manager.Update(context.Background(), env.cfg)
+	require.NoError(t, err)
+	assert.True(t, skipped.SkippedBackoff)
+	assert.Equal(t, result.RetryAfter, skipped.RetryAfter)
+	assert.Equal(t, 1, env.provider.calls)
+}
+
+// Yielding stops the batch between episodes, still rebuilds the feed, and the
+// next plain run finishes with exactly the state an uninterrupted run produces.
+func TestUpdateYieldsBetweenEpisodes(t *testing.T) {
+	episodes := func() []*model.Episode {
+		return []*model.Episode{
+			testEpisode("e1", time.Hour), testEpisode("e2", 2*time.Hour), testEpisode("e3", 3*time.Hour),
+		}
+	}
+
+	env := newUpdaterEnv(t, episodes()...)
+	yield := func() bool { return len(env.downloader.calls) >= 1 }
+
+	result, err := env.manager.UpdateYielding(context.Background(), env.cfg, yield)
+	require.NoError(t, err)
+	assert.True(t, result.Interrupted)
+	assert.Equal(t, 1, result.Downloaded)
+	assert.Len(t, env.downloader.calls, 1, "the in-flight download completes, no further one starts")
+
+	downloaded := 0
+	for id, episode := range env.episodes(t) {
+		if episode.Status == model.EpisodeDownloaded {
+			downloaded++
+			assert.Contains(t, env.xml(t), "<guid>"+id+"</guid>", "feed XML is rebuilt on yield")
+		} else {
+			assert.Equal(t, model.EpisodeNew, episode.Status, id)
+			assert.Zero(t, episode.Retries, id)
+		}
+	}
+	assert.Equal(t, 1, downloaded)
+
+	// Resume as a normal update
+	result, err = env.manager.Update(context.Background(), env.cfg)
+	require.NoError(t, err)
+	assert.False(t, result.Interrupted)
+	assert.Equal(t, 2, result.Downloaded)
+	assert.Equal(t, 0, result.Discovered)
+
+	reference := newUpdaterEnv(t, episodes()...)
+	require.NoError(t, reference.update(t))
+	assert.ElementsMatch(t, reference.identity(t), env.identity(t))
 }

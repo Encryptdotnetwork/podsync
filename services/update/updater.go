@@ -45,6 +45,51 @@ const (
 	rateLimitBackoffMax     = 2 * time.Hour
 )
 
+// Error categories reported in Result.ErrorCategory. They are fixed strings so
+// that callers (and the admin API) can expose them without leaking raw error
+// text, which may contain URLs or API keys.
+const (
+	ErrCategorySource    = "source"     // resolving the feed or querying the provider failed
+	ErrCategoryDatabase  = "database"   // reading the episode database failed
+	ErrCategoryDownload  = "download"   // downloading or storing an episode failed
+	ErrCategoryFeedBuild = "feed_build" // writing the feed XML or OPML failed
+	ErrCategoryInternal  = "internal"   // unexpected failure (for example a recovered panic)
+	ErrCategoryCancelled = "cancelled"  // shutdown interrupted the update
+)
+
+// Result describes the outcome of a single feed update.
+type Result struct {
+	// Discovered is the number of episodes newly added to the database.
+	Discovered int
+	// Downloaded is the number of episodes downloaded during this run.
+	Downloaded int
+	// Failed is the number of episode downloads that failed during this run.
+	Failed int
+	// SkippedBackoff is true when the update did not run because the feed is
+	// in a rate-limit backoff window.
+	SkippedBackoff bool
+	// RateLimited is true when this run itself ran into HTTP 429.
+	RateLimited bool
+	// RetryAfter is when the backoff window ends. Set with SkippedBackoff and
+	// RateLimited.
+	RetryAfter time.Time
+	// Interrupted is true when the download batch was stopped early to let a
+	// waiting manual request run. The feed XML was still rebuilt; the caller
+	// is expected to queue the feed again.
+	Interrupted bool
+	// ErrorCategory is one of the ErrCategory constants when Update returned
+	// an error.
+	ErrorCategory string
+}
+
+// downloadResult is the outcome of one download batch.
+type downloadResult struct {
+	downloaded  int
+	failed      int
+	rateLimited bool
+	yielded     bool
+}
+
 type feedBackoff struct {
 	delay time.Duration
 	until time.Time
@@ -146,11 +191,25 @@ func (u *Manager) CarryBackoffs(prev *Manager) {
 	}
 }
 
-func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
+// Update runs a full update of one feed: query the provider, download new
+// episodes, clean up and rebuild the feed XML and OPML.
+func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) (Result, error) {
+	return u.UpdateYielding(ctx, feedConfig, nil)
+}
+
+// UpdateYielding is Update with an optional shouldYield callback. It is
+// consulted between episode downloads (never during one); when it returns
+// true the rest of the batch is skipped, cleanup and feed generation still
+// run, and the result is marked Interrupted.
+func (u *Manager) UpdateYielding(ctx context.Context, feedConfig *feed.Config, shouldYield func() bool) (Result, error) {
+	var result Result
+
 	if until, ok := u.inBackoff(feedConfig.ID); ok {
 		log.WithField("feed_id", feedConfig.ID).
 			Warnf("skipping update: rate limited, next attempt after %s", until.Format(time.RFC3339))
-		return nil
+		result.SkippedBackoff = true
+		result.RetryAfter = until
+		return result, nil
 	}
 
 	log.WithFields(log.Fields{
@@ -162,9 +221,12 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 	started := time.Now()
 	rateLimited := false
 
-	if err := u.updateFeed(ctx, feedConfig); err != nil {
+	discovered, err := u.updateFeed(ctx, feedConfig)
+	result.Discovered = discovered
+	if err != nil {
 		if !errors.Is(err, ytdl.ErrTooManyRequests) {
-			return errors.Wrap(err, "update failed")
+			result.ErrorCategory = categoryFor(ctx, ErrCategorySource)
+			return result, errors.Wrap(err, "update failed")
 		}
 
 		// Rate limited during metadata fetch: skip downloads this cycle, but fall
@@ -179,14 +241,20 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 		// Fetch episodes for download
 		episodesToDownload, err := u.fetchEpisodes(ctx, feedConfig)
 		if err != nil {
-			return errors.Wrap(err, "fetch episodes failed")
+			result.ErrorCategory = categoryFor(ctx, ErrCategoryDatabase)
+			return result, errors.Wrap(err, "fetch episodes failed")
 		}
 
-		rateLimited, err = u.downloadEpisodes(ctx, feedConfig, episodesToDownload)
+		outcome, err := u.downloadEpisodes(ctx, feedConfig, episodesToDownload, shouldYield)
+		result.Downloaded = outcome.downloaded
+		result.Failed = outcome.failed
+		result.Interrupted = outcome.yielded
 		if err != nil {
-			return errors.Wrap(err, "download failed")
+			result.ErrorCategory = categoryFor(ctx, ErrCategoryDownload)
+			return result, errors.Wrap(err, "download failed")
 		}
 
+		rateLimited = outcome.rateLimited
 		if rateLimited {
 			delay := u.registerRateLimit(feedConfig.ID)
 			log.WithField("feed_id", feedConfig.ID).
@@ -199,61 +267,90 @@ func (u *Manager) Update(ctx context.Context, feedConfig *feed.Config) error {
 	}
 
 	if err := u.buildXML(ctx, feedConfig); err != nil {
-		return errors.Wrap(err, "xml build failed")
+		result.ErrorCategory = categoryFor(ctx, ErrCategoryFeedBuild)
+		return result, errors.Wrap(err, "xml build failed")
 	}
 
 	if err := u.buildOPML(ctx); err != nil {
-		return errors.Wrap(err, "opml build failed")
+		result.ErrorCategory = categoryFor(ctx, ErrCategoryFeedBuild)
+		return result, errors.Wrap(err, "opml build failed")
 	}
 
-	if !rateLimited {
+	if rateLimited {
+		result.RateLimited = true
+		if until, ok := u.inBackoff(feedConfig.ID); ok {
+			result.RetryAfter = until
+		}
+	} else {
 		u.clearBackoff(feedConfig.ID)
 	}
 
 	elapsed := time.Since(started)
 	log.Infof("successfully updated feed in %s", elapsed)
-	return nil
+	return result, nil
 }
 
-// updateFeed pulls API for new episodes and saves them to database
-func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error {
+// categoryFor reports a shutdown as "cancelled" regardless of the stage that
+// noticed it.
+func categoryFor(ctx context.Context, category string) string {
+	if ctx.Err() != nil {
+		return ErrCategoryCancelled
+	}
+	return category
+}
+
+// updateFeed pulls API for new episodes and saves them to database. It returns
+// the number of episodes that were not in the database before.
+func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) (int, error) {
 	info, err := builder.ParseURL(feedConfig.URL)
 	if err != nil {
-		return errors.Wrapf(err, "failed to parse URL: %s", feedConfig.URL)
+		return 0, errors.Wrapf(err, "failed to parse URL: %s", feedConfig.URL)
 	}
 
 	keyProvider, ok := u.keys[info.Provider]
 	if !ok {
-		return errors.Errorf("key provider %q not loaded", info.Provider)
+		return 0, errors.Errorf("key provider %q not loaded", info.Provider)
 	}
 
 	// Create an updater for this feed type
 	provider, err := u.newBuilder(ctx, info.Provider, keyProvider.Get(), u.downloader)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// Query API to get episodes
 	log.Debug("building feed")
 	result, err := provider.Build(ctx, feedConfig)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	log.Debugf("received %d episode(s) for %q", len(result.Episodes), result.Title)
 
-	episodeSet := make(map[string]struct{})
+	var (
+		episodeSet = make(map[string]struct{})
+		known      = make(map[string]struct{})
+	)
 	if err := u.db.WalkEpisodes(ctx, feedConfig.ID, func(episode *model.Episode) error {
+		known[episode.ID] = struct{}{}
 		if episode.Status != model.EpisodeDownloaded && episode.Status != model.EpisodeCleaned {
 			episodeSet[episode.ID] = struct{}{}
 		}
 		return nil
 	}); err != nil {
-		return err
+		return 0, err
+	}
+
+	discovered := 0
+	for _, episode := range result.Episodes {
+		if _, ok := known[episode.ID]; !ok {
+			discovered++
+			known[episode.ID] = struct{}{}
+		}
 	}
 
 	if err := u.db.AddFeed(ctx, feedConfig.ID, result); err != nil {
-		return err
+		return 0, err
 	}
 
 	for _, episode := range result.Episodes {
@@ -265,12 +362,12 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) error
 		log.Infof("removing episode %q", id)
 		err := u.db.DeleteEpisode(feedConfig.ID, id)
 		if err != nil {
-			return err
+			return discovered, err
 		}
 	}
 
 	log.Debug("successfully saved updates to storage")
-	return nil
+	return discovered, nil
 }
 
 func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([]*model.Episode, error) {
@@ -320,12 +417,18 @@ func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([
 	return downloadList, nil
 }
 
-// downloadEpisodes downloads the given episodes to storage. It returns rateLimited = true
-// if the remote server responded with HTTP 429 and the batch was cut short.
-func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config, downloadList []*model.Episode) (rateLimited bool, err error) {
+// downloadEpisodes downloads the given episodes to storage. The result reports
+// rateLimited if the remote server responded with HTTP 429 and the batch was
+// cut short, and yielded if shouldYield asked to stop between episodes. The
+// counters are valid even when an error is returned.
+func (u *Manager) downloadEpisodes(
+	ctx context.Context,
+	feedConfig *feed.Config,
+	downloadList []*model.Episode,
+	shouldYield func() bool,
+) (res downloadResult, err error) {
 	var (
 		downloadCount = len(downloadList)
-		downloaded    = 0
 		feedID        = feedConfig.ID
 	)
 
@@ -333,7 +436,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		log.Infof("download count: %d", downloadCount)
 	} else {
 		log.Info("no episodes to download")
-		return false, nil
+		return res, nil
 	}
 
 	// Download pending episodes
@@ -346,7 +449,15 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 
 		// Shutting down: leave the remaining episodes untouched
 		if ctx.Err() != nil {
-			return false, ctx.Err()
+			return res, ctx.Err()
+		}
+
+		// A manual request is waiting: stop between episodes (never in the
+		// middle of one) so it can run. The caller queues this feed again.
+		if shouldYield != nil && shouldYield() {
+			logger.Info("yielding to a waiting manual sync request")
+			res.yielded = true
+			return res, nil
 		}
 
 		// Check whether episode already exists
@@ -361,7 +472,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 				return nil
 			}); err != nil {
 				logger.WithError(err).Error("failed to update file info")
-				return false, err
+				return res, err
 			}
 
 			continue
@@ -369,7 +480,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			// Will download, do nothing here
 		} else {
 			logger.WithError(err).Error("failed to stat file")
-			return false, err
+			return res, err
 		}
 
 		// Download episode to disk
@@ -384,14 +495,15 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			// retry after the backoff window
 			if errors.Is(err, ytdl.ErrTooManyRequests) {
 				logger.Warn("server responded with a 'Too Many Requests' error")
-				return true, nil
+				res.rateLimited = true
+				return res, nil
 			}
 
 			// The download was interrupted by shutdown, not by a problem with the episode:
 			// don't count an attempt or run the error hooks
 			if ctx.Err() != nil {
 				logger.Info("download interrupted: context cancelled")
-				return false, ctx.Err()
+				return res, ctx.Err()
 			}
 
 			// Execute episode download error hooks
@@ -419,9 +531,10 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 				}
 				return nil
 			}); err != nil {
-				return false, err
+				return res, err
 			}
 
+			res.failed++
 			continue
 		}
 
@@ -430,7 +543,7 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 		tempFile.Close()
 		if err != nil {
 			logger.WithError(err).Error("failed to copy file")
-			return false, err
+			return res, err
 		}
 
 		// Execute post episode download hooks
@@ -458,14 +571,14 @@ func (u *Manager) downloadEpisodes(ctx context.Context, feedConfig *feed.Config,
 			episode.Status = model.EpisodeDownloaded
 			return nil
 		}); err != nil {
-			return false, err
+			return res, err
 		}
 
-		downloaded++
+		res.downloaded++
 	}
 
-	log.Infof("downloaded %d episode(s)", downloaded)
-	return false, nil
+	log.Infof("downloaded %d episode(s)", res.downloaded)
+	return res, nil
 }
 
 func (u *Manager) buildXML(ctx context.Context, feedConfig *feed.Config) error {

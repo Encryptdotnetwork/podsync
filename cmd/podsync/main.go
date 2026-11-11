@@ -179,7 +179,7 @@ func main() {
 		}
 
 		for _, _feed := range cfg.Feeds {
-			if err := manager.Update(ctx, _feed); err != nil {
+			if _, err := manager.Update(ctx, _feed); err != nil {
 				log.WithError(err).Errorf("failed to update feed: %s", _feed.URL)
 			}
 		}
