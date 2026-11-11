@@ -168,6 +168,19 @@ func (c *Config) validate() error {
 		if err := feed.ValidateFilenameTemplate(f.FilenameTemplate); err != nil {
 			result = multierror.Append(result, errors.Wrapf(err, "invalid filename_template for %q", id))
 		}
+		for _, p := range []struct{ field, pattern string }{
+			{"title", f.Filters.Title},
+			{"not_title", f.Filters.NotTitle},
+			{"description", f.Filters.Description},
+			{"not_description", f.Filters.NotDescription},
+		} {
+			if p.pattern == "" {
+				continue
+			}
+			if _, err := regexp.Compile(p.pattern); err != nil {
+				result = multierror.Append(result, errors.Wrapf(err, "invalid filters.%s for %q", p.field, id))
+			}
+		}
 		if f.Format == model.FormatCustom {
 			if err := feed.ValidateCustomExtension(f.CustomFormat.Extension); err != nil {
 				result = multierror.Append(result, errors.Wrapf(err, "invalid custom_format.extension for %q", id))

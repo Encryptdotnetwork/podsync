@@ -575,6 +575,43 @@ data_dir = "/data"
 	})
 }
 
+func TestFilterRegexpValidation(t *testing.T) {
+	t.Run("rejects invalid pattern naming feed and field", func(t *testing.T) {
+		const file = `
+[server]
+data_dir = "/data"
+
+[feeds]
+  [feeds.ID1]
+  url = "https://youtube.com/watch?v=ygIUF678y40"
+  filters = { not_title = "(unclosed" }
+`
+		path := setup(t, file)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `invalid filters.not_title for "ID1"`)
+	})
+
+	t.Run("accepts valid patterns", func(t *testing.T) {
+		const file = `
+[server]
+data_dir = "/data"
+
+[feeds]
+  [feeds.ID1]
+  url = "https://youtube.com/watch?v=ygIUF678y40"
+  filters = { title = "(?i)(tutorial|guide)", not_title = "^live", description = "a.*b", not_description = "\\bspam\\b" }
+`
+		path := setup(t, file)
+		defer os.Remove(path)
+
+		_, err := LoadConfig(path)
+		assert.NoError(t, err)
+	})
+}
+
 func setup(t *testing.T, file string) string {
 	t.Helper()
 

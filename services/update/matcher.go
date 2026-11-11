@@ -13,7 +13,7 @@ func matchRegexpFilter(pattern, str string, negative bool, logger log.FieldLogge
 	if pattern != "" {
 		matched, err := regexp.MatchString(pattern, str)
 		if err != nil {
-			logger.Warnf("pattern %q is not a valid")
+			logger.Warnf("pattern %q is not valid", pattern)
 		} else {
 			if matched == negative {
 				logger.Infof("skipping due to regexp mismatch")
