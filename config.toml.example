@@ -208,3 +208,22 @@ max_age = 30 # days
 max_backups = 7
 compress = true
 debug = false
+
+# Optional admin interface: a page at /admin/ with "Sync now" per feed and for all feeds,
+# plus a JSON API for status, config reads and (optionally) edits. Disabled by default.
+# A token of at least 32 characters is mandatory when enabled. Prefer the PODSYNC_ADMIN_TOKEN
+# environment variable over putting the token in this file.
+[admin]
+enabled = false
+# By default the admin API listens on its own port and must stay on a trusted network.
+port = 8095
+bind_address = "*"
+# token = ""
+# Serve the page and API under /admin/ on the main server port instead of the separate
+# listener (the port and bind_address above are then unused). Needs local storage, and the
+# feed ID "admin" is reserved. Every API route still requires "Authorization: Bearer <token>";
+# the page itself holds no secret.
+mount_on_server = false
+# Allow the routes that rewrite this file (PUT/DELETE under /admin/config and /admin/feeds).
+# When false they answer 403. Needs a writable config file, which a read-only bind mount is not.
+allow_config_edit = false
