@@ -33,15 +33,26 @@ const (
 	highAudioBytesPerSecond = 128000 / 8
 )
 
-type apiKey string
+// apiKeyHeader is the request header YouTube Data API reads the API key from.
+// Sending the key in a header (rather than the `key` URL parameter) keeps it out of
+// the URLs that Go embeds in transport-level error messages and thus out of the logs.
+const apiKeyHeader = "X-Goog-Api-Key"
 
-func (key apiKey) Get() (string, string) {
-	return "key", string(key)
+// apiKeyTransport is an http.RoundTripper that authenticates every request with an API key header.
+type apiKeyTransport struct {
+	key  string
+	base http.RoundTripper
+}
+
+func (t *apiKeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// RoundTrippers must not modify the caller's request, so work on a clone
+	req = req.Clone(req.Context())
+	req.Header.Set(apiKeyHeader, t.key)
+	return t.base.RoundTrip(req)
 }
 
 type YouTubeBuilder struct {
 	client     *youtube.Service
-	key        apiKey
 	downloader Downloader
 }
 
@@ -53,7 +64,7 @@ func (yt *YouTubeBuilder) resolveHandle(ctx context.Context, handle string) (str
 		Type("channel").
 		MaxResults(1)
 
-	resp, err := req.Context(ctx).Do(yt.key)
+	resp, err := req.Context(ctx).Do()
 	if err != nil {
 		return "", errors.Wrapf(err, "failed to search for handle: %s", handle)
 	}
@@ -92,7 +103,7 @@ func (yt *YouTubeBuilder) listChannels(ctx context.Context, linkType model.Type,
 		return nil, errors.New("unsupported link type")
 	}
 
-	resp, err := req.Context(ctx).Do(yt.key)
+	resp, err := req.Context(ctx).Do()
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to query channel")
 	}
@@ -116,7 +127,7 @@ func (yt *YouTubeBuilder) listPlaylists(ctx context.Context, id, channelID strin
 		req = req.ChannelId(channelID)
 	}
 
-	resp, err := req.Context(ctx).Do(yt.key)
+	resp, err := req.Context(ctx).Do()
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to query playlist")
 	}
@@ -143,7 +154,7 @@ func (yt *YouTubeBuilder) listPlaylistItems(ctx context.Context, feed *model.Fee
 		req = req.PageToken(pageToken)
 	}
 
-	resp, err := req.Context(ctx).Do(yt.key)
+	resp, err := req.Context(ctx).Do()
 	if err != nil {
 		return nil, "", errors.Wrap(err, "failed to query playlist items")
 	}
@@ -342,7 +353,7 @@ func (yt *YouTubeBuilder) queryVideoDescriptions(ctx context.Context, playlist m
 
 	// Loop in each slices of 50 (or less) IDs and query their description
 	for _, idsI := range idsList {
-		req, err := yt.client.Videos.List([]string{"id", "snippet", "contentDetails"}).Id(idsI).Context(ctx).Do(yt.key)
+		req, err := yt.client.Videos.List([]string{"id", "snippet", "contentDetails"}).Id(idsI).Context(ctx).Do()
 		if err != nil {
 			return errors.Wrap(err, "failed to query video descriptions")
 		}
@@ -516,10 +527,17 @@ func NewYouTubeBuilder(key string, ytdlp Downloader) (*YouTubeBuilder, error) {
 		return nil, errors.New("empty YouTube API key")
 	}
 
-	yt, err := youtube.NewService(context.Background(), option.WithHTTPClient(&http.Client{}))
+	return newYouTubeBuilder(key, http.DefaultTransport, ytdlp)
+}
+
+// newYouTubeBuilder creates a builder that sends requests through the given base transport.
+func newYouTubeBuilder(key string, base http.RoundTripper, ytdlp Downloader) (*YouTubeBuilder, error) {
+	client := &http.Client{Transport: &apiKeyTransport{key: key, base: base}}
+
+	yt, err := youtube.NewService(context.Background(), option.WithHTTPClient(client))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create youtube client")
 	}
 
-	return &YouTubeBuilder{client: yt, key: apiKey(key), downloader: ytdlp}, nil
+	return &YouTubeBuilder{client: yt, downloader: ytdlp}, nil
 }

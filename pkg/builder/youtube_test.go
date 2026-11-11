@@ -2,7 +2,11 @@ package builder
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -96,7 +100,6 @@ func TestResolveHandle(t *testing.T) {
 
 			_ = &YouTubeBuilder{
 				client: yt,
-				key:    apiKey("test-api-key"),
 			}
 
 			// Note: This test demonstrates the structure but won't actually work
@@ -169,4 +172,73 @@ func TestParseURLWithHandles(t *testing.T) {
 			require.Equal(t, tt.expected.ItemID, result.ItemID)
 		})
 	}
+}
+
+const testAPIKey = "fake-test-key-0000"
+
+// recordingTransport is a fake http.RoundTripper that records requests and answers them from the handler.
+type recordingTransport struct {
+	mu       sync.Mutex
+	requests []*http.Request
+	handler  func(req *http.Request) (*http.Response, error)
+}
+
+func (f *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	f.requests = append(f.requests, req)
+	f.mu.Unlock()
+	return f.handler(req)
+}
+
+func (f *recordingTransport) recorded() []*http.Request {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*http.Request(nil), f.requests...)
+}
+
+func jsonResponse(req *http.Request, body string) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}, nil
+}
+
+func newTestBuilder(t *testing.T, handler func(req *http.Request) (*http.Response, error), dl Downloader) (*YouTubeBuilder, *recordingTransport) {
+	t.Helper()
+	fake := &recordingTransport{handler: handler}
+	yt, err := newYouTubeBuilder(testAPIKey, fake, dl)
+	require.NoError(t, err)
+	return yt, fake
+}
+
+func TestAPIKeyNotLeakedInTransportError(t *testing.T) {
+	yt, fake := newTestBuilder(t, func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	}, nil)
+
+	_, err := yt.GetVideoCount(context.Background(), &model.Info{LinkType: model.TypeChannel, ItemID: "UC_test"})
+	require.Error(t, err)
+	require.Len(t, fake.recorded(), 1)
+
+	// The transport error still carries the request URL, but never the key
+	require.Contains(t, err.Error(), "youtube/v3/channels")
+	require.NotContains(t, err.Error(), testAPIKey)
+}
+
+func TestAPIKeySentInHeader(t *testing.T) {
+	yt, fake := newTestBuilder(t, func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(req, `{"items": [{"id": "UC_test", "statistics": {"videoCount": "42"}}]}`)
+	}, nil)
+
+	count, err := yt.GetVideoCount(context.Background(), &model.Info{LinkType: model.TypeChannel, ItemID: "UC_test"})
+	require.NoError(t, err)
+	require.EqualValues(t, 42, count)
+
+	reqs := fake.recorded()
+	require.Len(t, reqs, 1)
+	require.Equal(t, testAPIKey, reqs[0].Header.Get("X-Goog-Api-Key"))
+	require.False(t, reqs[0].URL.Query().Has("key"))
+	require.NotContains(t, reqs[0].URL.String(), testAPIKey)
 }
