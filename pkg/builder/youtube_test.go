@@ -10,110 +10,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"google.golang.org/api/option"
-	"google.golang.org/api/youtube/v3"
 
 	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/model"
 	"github.com/mxpv/podsync/pkg/ytdl"
 )
-
-// MockTransport implements http.RoundTripper for testing
-type MockTransport struct {
-	responses map[string]*http.Response
-}
-
-func (m *MockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	url := req.URL.String()
-	if resp, exists := m.responses[url]; exists {
-		return resp, nil
-	}
-	return &http.Response{
-		StatusCode: 404,
-		Body:       http.NoBody,
-	}, nil
-}
-
-func TestResolveHandle(t *testing.T) {
-	tests := []struct {
-		name     string
-		handle   string
-		mockResp string
-		expected string
-		wantErr  bool
-	}{
-		{
-			name:   "valid handle",
-			handle: "testhandle",
-			mockResp: `{
-				"items": [
-					{
-						"snippet": {
-							"channelId": "UC_test_channel_id_123"
-						}
-					}
-				]
-			}`,
-			expected: "UC_test_channel_id_123",
-			wantErr:  false,
-		},
-		{
-			name:     "handle not found",
-			handle:   "nonexistent",
-			mockResp: `{"items": []}`,
-			expected: "",
-			wantErr:  true,
-		},
-		{
-			name:   "empty channel ID",
-			handle: "badhandle",
-			mockResp: `{
-				"items": [
-					{
-						"snippet": {
-							"channelId": ""
-						}
-					}
-				]
-			}`,
-			expected: "",
-			wantErr:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create a mock HTTP client
-			mockTransport := &MockTransport{
-				responses: make(map[string]*http.Response),
-			}
-
-			// Set up the mock response based on expected API call
-			mockTransport.responses["https://youtube.googleapis.com/youtube/v3/search"] = &http.Response{
-				StatusCode: 200,
-				Body:       http.NoBody, // Simplified for this test
-			}
-
-			client := &http.Client{Transport: mockTransport}
-
-			// Create YouTube service with mock client
-			yt, err := youtube.NewService(context.Background(), option.WithHTTPClient(client))
-			require.NoError(t, err)
-
-			_ = &YouTubeBuilder{
-				client: yt,
-			}
-
-			// Note: This test demonstrates the structure but won't actually work
-			// without proper mocking of the YouTube API responses.
-			// For a real implementation, you'd need more sophisticated mocking
-			// like using httptest.Server or a proper mock library.
-
-			// Skip the actual API call test since it requires complex mocking
-			t.Skip("Skipping API call test - requires more sophisticated mocking")
-		})
-	}
-}
 
 func TestParseURLWithHandles(t *testing.T) {
 	tests := []struct {
@@ -316,4 +217,52 @@ func TestBuildPlaylistCustomCoverSkipsMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, dl.calls)
 	require.Len(t, f.Episodes, 1)
+}
+
+// handleAPIHandler answers like the API does for an @handle feed, and fails on anything unexpected (e.g. search).
+func handleAPIHandler(req *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(req.URL.Path, "/channels") {
+		return jsonResponse(req, `{"items": [{"id": "UC_test", "snippet": {"title": "Chan", "description": "Desc",
+			"publishedAt": "2020-01-02T03:04:05Z", "thumbnails": {"default": {"url": "https://img.example/chan.jpg"}}},
+			"contentDetails": {"relatedPlaylists": {"uploads": "UU_test"}}}]}`)
+	}
+
+	return playlistAPIHandler(req)
+}
+
+func TestHandleLookupUsesForHandle(t *testing.T) {
+	yt, fake := newTestBuilder(t, handleAPIHandler, nil)
+
+	f, err := yt.Build(context.Background(), &feed.Config{URL: "https://www.youtube.com/@testhandle"})
+	require.NoError(t, err)
+	require.Equal(t, "UU_test", f.ItemID)
+	require.Equal(t, "@testhandle", f.Author)
+	require.Len(t, f.Episodes, 1)
+
+	var channelReqs int
+	for _, req := range fake.recorded() {
+		require.False(t, strings.HasSuffix(req.URL.Path, "/search"), "unexpected search request: %s", req.URL)
+
+		if strings.HasSuffix(req.URL.Path, "/channels") {
+			channelReqs++
+			require.Equal(t, "@testhandle", req.URL.Query().Get("forHandle"))
+			require.False(t, req.URL.Query().Has("id"))
+		}
+	}
+
+	require.Equal(t, 1, channelReqs)
+}
+
+func TestHandleNotFound(t *testing.T) {
+	yt, fake := newTestBuilder(t, func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(req, `{"items": []}`)
+	}, nil)
+
+	_, err := yt.GetVideoCount(context.Background(), &model.Info{LinkType: model.TypeHandle, ItemID: "nonexistent"})
+	require.ErrorIs(t, err, model.ErrNotFound)
+
+	reqs := fake.recorded()
+	require.Len(t, reqs, 1)
+	require.True(t, strings.HasSuffix(reqs[0].URL.Path, "/channels"))
+	require.Equal(t, "@nonexistent", reqs[0].URL.Query().Get("forHandle"))
 }
