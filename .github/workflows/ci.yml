@@ -52,6 +52,22 @@ jobs:
       # exhaust the shared Vimeo rate limit.
       - run: make test
 
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27
+      - uses: actions/checkout@v7
+      # No secrets here: the live API tests stay skipped. Linux only because
+      # -race needs cgo, which the Windows runner setup may not provide.
+      - run: go test -race ./...
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
