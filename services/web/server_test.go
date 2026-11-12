@@ -458,3 +458,43 @@ func TestNoListingEnabledWhenConfigured(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "audio content", rec.Body.String())
 }
+
+func TestAdminHandlerMount(t *testing.T) {
+	tmpDir := t.TempDir()
+	storage, err := fs.NewLocal(tmpDir, false, false)
+	require.NoError(t, err)
+	_, err = storage.Create(context.Background(), "example.xml", bytes.NewReader([]byte("feed content")))
+	require.NoError(t, err)
+
+	admin := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("admin:" + r.URL.Path))
+	})
+
+	serve := func(srv *Server, path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+
+	// Without the option nothing is served under /admin/
+	plain := New(Config{Port: 8080}, storage, nil)
+	assert.Equal(t, http.StatusNotFound, serve(plain, "/admin/sync").Code)
+
+	// With it, the handler gets everything under /admin/ and feed files are unaffected
+	for _, cfg := range []Config{{Port: 8080}, {Port: 8080, Path: "podcasts"}} {
+		srv := New(cfg, storage, nil, WithAdminHandler(admin))
+
+		rec := serve(srv, "/admin/sync")
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "admin:/admin/sync", rec.Body.String())
+		assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+
+		feedPath := "/example.xml"
+		if cfg.Path != "" {
+			feedPath = "/podcasts/example.xml"
+		}
+		rec = serve(srv, feedPath)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "feed content", rec.Body.String())
+	}
+}

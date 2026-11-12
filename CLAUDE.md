@@ -21,9 +21,9 @@ Podsync is a Go-based service that converts YouTube, Vimeo, SoundCloud, and Twit
 - **ytdl/**: YouTube-dl wrapper for media downloading
 
 ### Services (`services/`)
-- **update/**: Feed update orchestration and scheduling (scheduler.go: cron + single-consumer update loop + config hot-reload), episode filtering via matcher.go
+- **update/**: Feed update orchestration and scheduling (scheduler.go: cron + single-consumer update loop + config hot-reload; queue.go: two-lane de-duplicating queue; sync.go: manual "Sync now" API and in-memory status), episode filtering via matcher.go
 - **web/**: HTTP server for serving podcast feeds, media files, and health checks
-- **admin/**: Internal administrative HTTP API on a separate port (config editing, hot reload); disabled by default
+- **admin/**: Administrative HTTP API (config reads/edits, hot reload, manual sync) plus the embedded `/admin/` page (`ui/`); disabled by default, separate port unless `admin.mount_on_server`
 - **migrate/**: Filename migration tooling for transitioning to custom filename templates
 
 ### Configuration Engine (`pkg/config/`)
@@ -62,6 +62,14 @@ Understanding how episodes flow through the system:
 - Deleted episodes have status changed to `EpisodeCleaned` and title/description cleared
 - **Files are deleted from storage but database records are retained**
 - This is a soft-delete: episodes remain in the database forever
+
+### Manual sync ("Sync now")
+- `Scheduler.SyncNow(feedID)` / `SyncAll()` / `Status()` (sync.go) feed the same `Manager.Update` as the cron path with the same feed config; there is no second pipeline
+- `updateQueue` (queue.go) has a manual lane and a scheduled lane, at most one pending entry per feed (a manual push promotes a pending scheduled entry), and never blocks producers. The Run goroutine pops manual first and is the only consumer, so two updates never run at once
+- A scheduled run checks `shouldYield` between episode downloads (never during one). When a manual request for another feed is waiting it stops the batch, still runs cleanup and feed generation, and the feed returns to the head of the scheduled lane. Manual runs never yield
+- A request for the feed that is updating right now queues exactly one follow-up. Requests are refused (429) while the feed is in a rate-limit backoff and for 30 seconds after that feed's last manual run (`ManualSyncSpacing`)
+- `Manager.Update` returns `(Result, error)`: episodes discovered/downloaded/failed, whether it was skipped for backoff (with the retry time), rate limited or interrupted, and a fixed `ErrorCategory`. Status lives in memory only and is lost on restart; raw errors go to the log only
+- Concurrency: `Scheduler.mu` guards the `manager` pointer, `statusMu` guards `statuses`/`lastManual`, `updateQueue.mu` guards the lanes. Lock order is `statusMu`, then the queue lock. `s.feeds`, `s.entries` and the cron table belong to the Run goroutine; HTTP-side code resolves feeds through the store snapshot
 
 ### Episode Removal from Database
 - Episodes are removed from the database only if they:
@@ -255,11 +263,13 @@ keep_last = 50                         # Applied to all feeds unless overridden
 ```toml
 [admin]
 enabled = false                        # Admin API server (disabled by default)
-port = 8095                            # Listen port (default 8095)
-bind_address = "*"                     # IP to bind ("*" for all)
-token = ""                             # If set, require "Authorization: Bearer <token>" on /admin
+port = 8095                            # Listen port (default 8095); unused with mount_on_server
+bind_address = "*"                     # IP to bind ("*" for all); unused with mount_on_server
+token = ""                             # Required (32+ chars) when enabled; "Authorization: Bearer <token>" on every API route
+mount_on_server = false                # Serve under /admin/ on the web server's port instead of the separate listener
+allow_config_edit = false              # PUT/DELETE config routes return 403 unless true
 ```
-Environment variable: `PODSYNC_ADMIN_TOKEN` (takes precedence over the config value). Changes to the `[admin]` block itself require a restart.
+Environment variable: `PODSYNC_ADMIN_TOKEN` (takes precedence over the config value). Changes to the `[admin]` block itself require a restart. `mount_on_server` needs local storage (the web server must run) and reserves the URL prefix `/admin/`: the feed ID `admin` and `server.path = "admin"` are rejected by validation.
 
 ### Logging
 ```toml
@@ -335,19 +345,24 @@ debug = false
 
 ## Admin API (services/admin)
 
-A separate internal HTTP server (default port 8095, `admin.enabled = true` required) for managing `config.toml` at runtime. It must never be published to the internet — restrict it via Docker network isolation, a Traefik IP allowlist (see `docker-compose.dev.yml`), and/or the bearer token.
+An internal HTTP API (`admin.enabled = true` required) for managing `config.toml` at runtime and triggering manual syncs. By default it is a separate server on port 8095; with `admin.mount_on_server = true` the same handler is mounted under `/admin/` on the web server's listener and no second listener starts. Either way it must not be reachable from the internet unfiltered: restrict it via Docker network isolation, a reverse-proxy IP allowlist (see `docker-compose.dev.yml`; keep `/admin` out of any public router), and the bearer token.
 
 ### Endpoints
 All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy rules can never collide with paths fetched by the public feed server or its web UI.
-- `GET /healthz` - Liveness (unauthenticated)
+- `GET /healthz` - Liveness (unauthenticated); only on the separate listener, not exposed when mounted on the web server
 - `GET /admin/config` - Full config, API tokens redacted to last 4 characters
 - `GET /admin/config/{section}` - One of: server, storage, tokens, feeds, downloader, log
 - `PUT /admin/config/{section}` - Replace a section (JSON body)
 - `GET /admin/feeds` - Feed summaries; `GET/PUT/DELETE /admin/feeds/{id}` - single feed CRUD
 - `POST /admin/reload` - Re-read config.toml from disk (after hand edits)
+- `POST /admin/feeds/{id}/sync` - Queue a manual update of one feed: 202 (queued or already queued), 404 unknown feed, 429 with `Retry-After` while the feed is rate limited or was manually synced less than 30 seconds ago
+- `POST /admin/sync` - Queue every feed ("Sync all"): 202 with `queued`/`refused` lists, 429 if all were refused
+- `GET /admin/sync` - Per-feed status: `idle`, `queued`, `syncing`, `completed` (nothing failed), `completed_with_errors` (the update succeeded but at least one episode download failed), `no_new_episodes`, `failed` (fixed error category only, never raw error text), `rate_limited` (with `retry_after`); `busy` is true while anything is queued or syncing
+- `GET /admin/` (plus `admin.js`, `admin.css`) - The embedded admin page: unauthenticated static files served with CSP `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'`. The user types the token, it lives in `sessionStorage`, and content is rendered with `textContent` only. It shows the sync table with "Sync now" and "Sync all", polling every 2 seconds while anything is queued or syncing
 
 ### Semantics
 - All edits go through `config.Store`: mutate the TOML document via tomledit (comments and key order preserved), validate via the standard config validation, then write atomically (temp file + rename in the same directory, keeping the existing file mode). Invalid payloads return 400 and never touch disk.
+- `PUT`/`DELETE` on `/admin/config/*` and `/admin/feeds/*` return 403 (after the 401 check) unless `admin.allow_config_edit = true`; a read-only config mount cannot be edited anyway
 - Store snapshots are shared read-only: `store.Get()` returns the same `*Config` (and `*feed.Config` pointers) to the scheduler and the admin handlers, so never write into it — derive values locally (the scheduler computes the implicit `@every {update_period}` schedule without storing it back).
 - Optimistic concurrency: GET responses carry an `ETag` header (SHA-256 of the file); send it back via `If-Match` on PUT/DELETE — a mismatch returns 412.
 - Hot reload: changes to `[feeds]` and `[tokens]` are applied live — the store publishes the new config to the update scheduler, which rebuilds the cron table and the update manager between feed updates (active 429 backoffs are carried over). Other sections (`server`, `storage`, `database`, `downloader`, `log`, `admin`) are saved to disk but require a restart (`restart_required: true` in the response).
@@ -541,6 +556,8 @@ This project uses golangci-lint with strict formatting rules configured in `.gol
 - Feed update: `services/update/updater.go` (episode lifecycle, cleanup, rate-limit backoff)
 - Update scheduling and hot reload: `services/update/scheduler.go`
 - Admin API: `services/admin/server.go`, `services/admin/handlers.go`
+- Admin page (embedded): `services/admin/ui.go`, `services/admin/ui/`
+- Update queue and manual sync: `services/update/queue.go`, `services/update/sync.go`
 - Episode filtering: `services/update/matcher.go`
 - Database: `pkg/db/badger.go`
 - Storage: `pkg/fs/local.go`, `pkg/fs/s3.go`

@@ -57,7 +57,27 @@ type Config struct {
 	NoListing bool `toml:"no_listing"`
 }
 
-func New(cfg Config, storage http.FileSystem, database db.Storage) *Server {
+// Option customises the server built by New.
+type Option func(*options)
+
+type options struct {
+	adminHandler http.Handler
+}
+
+// WithAdminHandler mounts handler under /admin/ on this server, so the admin
+// page and API share the feed server's listener. Those paths are reserved: a
+// feed called "admin" or a server path of "admin" would collide with them
+// (config validation rejects both).
+func WithAdminHandler(handler http.Handler) Option {
+	return func(o *options) { o.adminHandler = handler }
+}
+
+func New(cfg Config, storage http.FileSystem, database db.Storage, opts ...Option) *Server {
+	var o options
+	for _, apply := range opts {
+		apply(&o)
+	}
+
 	port := cfg.Port
 	if port == 0 {
 		port = 8080
@@ -97,6 +117,14 @@ func New(cfg Config, storage http.FileSystem, database db.Storage) *Server {
 	// avoids CDN hotlink restrictions (Sec-Fetch-Site: cross-site is blocked by
 	// some CDNs even with referrerpolicy="no-referrer").
 	mux.HandleFunc("/thumbnail", thumbnailProxyHandler)
+
+	// Optionally serve the admin page and API from this listener. The more
+	// specific "/admin/" pattern wins over the file server mounted above, so
+	// nothing under it is ever looked up in the media storage.
+	if o.adminHandler != nil {
+		log.Info("admin interface mounted at /admin/")
+		mux.Handle("/admin/", o.adminHandler)
+	}
 
 	// Optionally enable debug endpoints (disabled by default for security)
 	if cfg.DebugEndpoints {

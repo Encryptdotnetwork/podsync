@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Podsync admin</title>
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <header>
+    <h1>Podsync</h1>
+    <span class="subtitle">Sync control</span>
+  </header>
+
+  <main>
+    <section id="login">
+      <form id="login-form" autocomplete="off">
+        <label for="token">Admin token</label>
+        <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required>
+        <button type="submit">Connect</button>
+      </form>
+      <p id="login-error" class="error" role="alert"></p>
+    </section>
+
+    <section id="panel" hidden>
+      <div class="toolbar">
+        <button id="sync-all" type="button">Sync all</button>
+        <button id="refresh" type="button" class="secondary">Refresh</button>
+        <button id="sign-out" type="button" class="secondary">Sign out</button>
+        <span id="message" role="status" aria-live="polite"></span>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Feed</th>
+            <th scope="col">Status</th>
+            <th scope="col">Started by</th>
+            <th scope="col">Finished</th>
+            <th scope="col">Result</th>
+            <th scope="col">Details</th>
+            <th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="feeds"></tbody>
+      </table>
+      <p id="empty" hidden>No feeds are configured.</p>
+    </section>
+  </main>
+
+  <script src="admin.js"></script>
+</body>
+</html>

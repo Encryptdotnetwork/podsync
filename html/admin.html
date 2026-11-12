@@ -221,7 +221,7 @@ async function handleApiError(err, context) {
 
 /* ============ Go field names -> TOML keys ============ */
 const FEED_MAP = {
-    ID: null, PostEpisodeDownload: null, OnEpisodeDownloadError: null,
+    ID: null,
     URL: 'url', PageSize: 'page_size', UpdatePeriod: 'update_period', CronSchedule: 'cron_schedule',
     Quality: 'quality', MaxHeight: 'max_height', Format: 'format',
     YouTubeDLArgs: 'youtube_dl_args', OPML: 'opml', PrivateFeed: 'private_feed',
@@ -231,6 +231,9 @@ const FEED_MAP = {
                NotDescription: 'not_description', MinDuration: 'min_duration', MaxDuration: 'max_duration',
                MaxAge: 'max_age', MinAge: 'min_age' },
     Clean: { __key: 'clean', KeepLast: 'keep_last' },
+    // Hooks are arrays of {Command, Timeout}; goToToml maps each element
+    PostEpisodeDownload: { __key: 'post_episode_download', Command: 'command', Timeout: 'timeout' },
+    OnEpisodeDownloadError: { __key: 'on_episode_download_error', Command: 'command', Timeout: 'timeout' },
     Custom: { __key: 'custom', CoverArt: 'cover_art', CoverArtQuality: 'cover_art_quality', Category: 'category',
               Subcategories: 'subcategories', Explicit: 'explicit', Language: 'lang', Author: 'author',
               Title: 'title', Description: 'description', OwnerName: 'ownerName', OwnerEmail: 'ownerEmail', Link: 'link' },
@@ -248,6 +251,7 @@ const KEYMAPS = {
 };
 
 function goToToml(obj, map) {
+    if (Array.isArray(obj) && map && typeof map === 'object') return obj.map(el => goToToml(el, map));
     if (obj == null || typeof obj !== 'object' || Array.isArray(obj)) return obj;
     const out = {};
     for (const [k, v] of Object.entries(obj)) {
@@ -377,7 +381,7 @@ function openFeedModal(id) {
         $('f_opml').checked = !!t.opml;
         $('f_private').checked = !!t.private_feed;
         // Preserve everything the quick fields don't cover (custom format,
-        // hooks aren't returned, playlist_sort, templates, extra custom keys...)
+        // hooks, playlist_sort, templates, extra custom keys...)
         const extra = { ...t };
         ['url','format','quality','max_height','page_size','update_period','cron_schedule','clean','filters','opml','private_feed'].forEach(k => delete extra[k]);
         if (extra.custom) { extra.custom = { ...extra.custom }; delete extra.custom.lang; if (!Object.keys(extra.custom).length) delete extra.custom; }

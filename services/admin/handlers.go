@@ -3,17 +3,22 @@ package admin
 import (
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/creachadair/tomledit"
 	"github.com/creachadair/tomledit/parser"
 	toml "github.com/pelletier/go-toml"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/mxpv/podsync/pkg/config"
 	"github.com/mxpv/podsync/pkg/model"
+	"github.com/mxpv/podsync/services/update"
 )
 
 // maxBodyBytes caps request bodies accepted by the admin API.
@@ -350,7 +355,9 @@ func removeKeyPrefix(doc *tomledit.Document, prefix parser.Key) {
 // spliceFragment appends the fragment's content to the document. Sections that
 // already exist in the document (e.g. the [feeds] parent table when adding a
 // new [feeds.X]) are merged into the existing section rather than appended,
-// since TOML forbids duplicate table headers.
+// since TOML forbids duplicate table headers. Array-of-tables headings
+// ([[feeds.ID.post_episode_download]]) are the exception: each occurrence is a
+// separate element, so they are always appended and never merged.
 func spliceFragment(doc, frag *tomledit.Document) {
 	if frag.Global != nil && len(frag.Global.Items) > 0 {
 		if doc.Global == nil {
@@ -362,13 +369,13 @@ func spliceFragment(doc, frag *tomledit.Document) {
 
 	existing := make(map[string]*tomledit.Section)
 	for _, section := range doc.Sections {
-		if section.Heading != nil {
+		if section.Heading != nil && !section.IsArray {
 			existing[keyString(section.Name)] = section
 		}
 	}
 
 	for _, section := range frag.Sections {
-		if section.Heading != nil {
+		if section.Heading != nil && !section.IsArray {
 			if present, ok := existing[keyString(section.Name)]; ok {
 				present.Items = append(present.Items, section.Items...)
 				continue
@@ -423,10 +430,112 @@ func writeUpdateError(w http.ResponseWriter, err error) {
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// Fixed messages for the sync routes. Raw error text from the scheduler or the
+// providers is logged, never returned: it can contain URLs and credentials.
+const (
+	msgSyncUnavailable = "manual sync is not available"
+	msgSyncFailed      = "sync request failed"
+	msgSyncRefused     = "sync request refused"
+)
+
+// syncRefusal is the body of a 429 answer to a sync request.
+type syncRefusal struct {
+	Error      string    `json:"error"`
+	Reason     string    `json:"reason"`
+	RetryAfter time.Time `json:"retry_after"`
+}
+
+// writeRetryAfter sets the Retry-After header (whole seconds, at least 1).
+func writeRetryAfter(w http.ResponseWriter, until time.Time) {
+	seconds := int(math.Ceil(time.Until(until).Seconds()))
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+}
+
+// handleSyncFeed queues a manual update of one feed: 202 when it is queued (or
+// already was), 404 for an unknown feed, 429 with Retry-After while the feed is
+// rate limited or was synced manually a moment ago.
+func (s *Server) handleSyncFeed(w http.ResponseWriter, r *http.Request) {
+	if s.syncer == nil {
+		writeError(w, http.StatusServiceUnavailable, msgSyncUnavailable)
+		return
+	}
+
+	status, err := s.syncer.SyncNow(r.PathValue("id"))
+
+	var refused *update.RefusedError
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusAccepted, status)
+	case errors.Is(err, update.ErrUnknownFeed):
+		writeError(w, http.StatusNotFound, "feed not found")
+	case errors.As(err, &refused):
+		writeRetryAfter(w, refused.RetryAfter)
+		writeJSON(w, http.StatusTooManyRequests, syncRefusal{
+			Error:      msgSyncRefused,
+			Reason:     refused.Reason,
+			RetryAfter: refused.RetryAfter,
+		})
+	default:
+		log.WithError(err).Error("manual sync request failed")
+		writeError(w, http.StatusInternalServerError, msgSyncFailed)
+	}
+}
+
+// handleSyncAll queues a manual update of every feed. The answer is 202 with
+// the lists of queued and refused feeds; if every feed was refused it is 429
+// with Retry-After set to the earliest retry time.
+func (s *Server) handleSyncAll(w http.ResponseWriter, _ *http.Request) {
+	if s.syncer == nil {
+		writeError(w, http.StatusServiceUnavailable, msgSyncUnavailable)
+		return
+	}
+
+	result, err := s.syncer.SyncAll()
+	if err != nil {
+		log.WithError(err).Error("manual sync-all request failed")
+		writeError(w, http.StatusInternalServerError, msgSyncFailed)
+		return
+	}
+
+	if result.Queued == nil {
+		result.Queued = []string{}
+	}
+	if result.Refused == nil {
+		result.Refused = []update.RefusedFeed{}
+	}
+
+	if len(result.Queued) == 0 && len(result.Refused) > 0 {
+		earliest := result.Refused[0].RetryAfter
+		for _, refused := range result.Refused[1:] {
+			if refused.RetryAfter.Before(earliest) {
+				earliest = refused.RetryAfter
+			}
+		}
+		writeRetryAfter(w, earliest)
+		writeJSON(w, http.StatusTooManyRequests, result)
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) handleSyncStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.syncer == nil {
+		writeError(w, http.StatusServiceUnavailable, msgSyncUnavailable)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, s.syncer.Status())
 }

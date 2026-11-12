@@ -32,7 +32,14 @@ func newTestScheduler(t *testing.T, feeds map[string]*feed.Config) *Scheduler {
 		feeds:   feeds,
 		cron:    cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger))),
 		entries: make(map[string]cron.EntryID),
-		updates: make(chan string, 16),
+		queue:   newUpdateQueue(),
+
+		statuses:   make(map[string]*FeedStatus),
+		lastManual: make(map[string]time.Time),
+		currentFeeds: func() map[string]*feed.Config {
+			return feeds
+		},
+		now: time.Now,
 	}
 }
 
@@ -45,26 +52,19 @@ func testFeedConfigs(t *testing.T, feeds map[string]*feed.Config) map[string]*fe
 	return feeds
 }
 
-func receiveID(t *testing.T, ch <-chan string) string {
+func receiveID(t *testing.T, q *updateQueue) string {
 	t.Helper()
 
-	select {
-	case id := <-ch:
-		return id
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for an enqueued feed ID")
-		return ""
-	}
+	id, _, ok := q.pop()
+	require.True(t, ok, "expected an enqueued feed ID")
+	return id
 }
 
-func assertNoPendingID(t *testing.T, ch <-chan string) {
+func assertNoPendingID(t *testing.T, q *updateQueue) {
 	t.Helper()
 
-	select {
-	case id := <-ch:
-		t.Fatalf("unexpected feed ID enqueued: %q", id)
-	case <-time.After(100 * time.Millisecond):
-	}
+	id, _, ok := q.pop()
+	require.False(t, ok, "unexpected feed ID enqueued: %q", id)
 }
 
 func TestSchedulerRebuildSchedule(t *testing.T) {
@@ -113,8 +113,6 @@ func TestSchedulerInvalidCronScheduleSkipsFeed(t *testing.T) {
 }
 
 func TestSchedulerApplyReloadRebuildsCron(t *testing.T) {
-	ctx := context.Background()
-
 	s := newTestScheduler(t, map[string]*feed.Config{
 		"A": {URL: "https://youtube.com/channel/a", UpdatePeriod: time.Hour},
 		"B": {URL: "https://youtube.com/channel/b", CronSchedule: "0 */6 * * *"},
@@ -129,7 +127,7 @@ func TestSchedulerApplyReloadRebuildsCron(t *testing.T) {
 			"C": {URL: "https://youtube.com/channel/c", UpdatePeriod: time.Hour},
 		}),
 	}
-	s.applyReload(ctx, newCfg)
+	s.applyReload(newCfg)
 
 	// Manager rebuilt, feeds map swapped to the new config
 	assert.NotSame(t, oldManager, s.manager)
@@ -144,8 +142,8 @@ func TestSchedulerApplyReloadRebuildsCron(t *testing.T) {
 
 	// Only the newly added implicit feed gets an immediate first update;
 	// pre-existing feeds keep their regular cadence
-	assert.Equal(t, "C", receiveID(t, s.updates))
-	assertNoPendingID(t, s.updates)
+	assert.Equal(t, "C", receiveID(t, s.queue))
+	assertNoPendingID(t, s.queue)
 }
 
 func TestSchedulerProcessUpdateDropsStaleIDs(t *testing.T) {
@@ -159,11 +157,11 @@ func TestSchedulerProcessUpdateDropsStaleIDs(t *testing.T) {
 	// "GONE" simulates an ID queued before a reload removed the feed. It must
 	// be dropped without touching the manager — whose dependencies are nil here
 	// and would panic if an update were attempted with no resolvable config.
-	s.processUpdate(ctx, "GONE")
+	s.processUpdate(ctx, "GONE", false)
 
 	// A resolvable ID runs through the manager using the current feeds map
 	// (the nil-keyed manager fails the update gracefully, which is logged)
-	s.processUpdate(ctx, "A")
+	s.processUpdate(ctx, "A", false)
 }
 
 // A panic inside a provider must not take down the daemon: it is recovered,
@@ -194,14 +192,12 @@ func TestSchedulerProcessUpdateRecoversFromPanic(t *testing.T) {
 	}
 	s.manager = manager
 
-	require.NotPanics(t, func() { s.processUpdate(ctx, "A") })
-	require.NotPanics(t, func() { s.processUpdate(ctx, "A") })
+	require.NotPanics(t, func() { s.processUpdate(ctx, "A", false) })
+	require.NotPanics(t, func() { s.processUpdate(ctx, "A", false) })
 	assert.Equal(t, 2, calls, "the update must be attempted again after a recovered panic")
 }
 
 func TestSchedulerReloadCarriesBackoffs(t *testing.T) {
-	ctx := context.Background()
-
 	s := newTestScheduler(t, map[string]*feed.Config{
 		"A": {URL: "https://youtube.com/channel/a", UpdatePeriod: time.Hour},
 	})
@@ -213,7 +209,7 @@ func TestSchedulerReloadCarriesBackoffs(t *testing.T) {
 	until, ok := s.manager.inBackoff("A")
 	require.True(t, ok)
 
-	s.applyReload(ctx, &config.Config{
+	s.applyReload(&config.Config{
 		Feeds: testFeedConfigs(t, map[string]*feed.Config{
 			"A": {URL: "https://youtube.com/channel/a", UpdatePeriod: time.Hour},
 		}),

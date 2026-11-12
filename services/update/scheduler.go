@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/robfig/cron/v3"
@@ -17,10 +19,10 @@ import (
 )
 
 // Scheduler owns the feed update queue, the cron table and the update Manager.
-// Cron entries enqueue feed IDs into a buffered channel drained by the single
-// Run goroutine, so feed updates never run concurrently with each other — and
-// config reloads, which are handled in the same loop, never interleave with an
-// in-flight update.
+// Cron entries and manual requests push feed IDs into a de-duplicating,
+// non-blocking queue drained by the single Run goroutine, so feed updates
+// never run concurrently with each other, and config reloads, which are
+// handled in the same loop, never interleave with an in-flight update.
 type Scheduler struct {
 	store *config.Store
 
@@ -29,16 +31,46 @@ type Scheduler struct {
 	db         db.Storage
 	fs         fs.Storage
 
-	// Owned by the Run goroutine after startup; rebuilt by applyReload
+	// Owned by the Run goroutine after startup; rebuilt by applyReload. The
+	// manager pointer is also read by HTTP handlers (SyncNow checks the
+	// rate-limit backoff), so it is guarded by mu: applyReload writes it under
+	// the write lock and every other goroutine reads it via currentManager.
+	// The Run goroutine itself, being the only writer, may read it directly.
+	mu      sync.RWMutex
 	manager *Manager
+
+	// Owned by the Run goroutine only: HTTP handlers resolve feeds through
+	// currentFeeds (the store snapshot) instead
 	feeds   map[string]*feed.Config
 	cron    *cron.Cron
 	entries map[string]cron.EntryID
 
 	// The queue carries feed IDs, not config pointers: IDs are resolved against
 	// the current feeds map at dequeue time, so items queued before a reload
-	// run with the freshest settings (or are dropped if the feed was removed)
-	updates chan string
+	// run with the freshest settings (or are dropped if the feed was removed).
+	// It is safe for concurrent use.
+	queue *updateQueue
+
+	// Sync status, written by the Run goroutine and by producers (cron
+	// callbacks, SyncNow) and read by Status; statusMu guards statuses and
+	// lastManual. It is always taken before the queue's own lock, never after,
+	// and queue changes that must be consistent with a status change happen
+	// while holding it.
+	statusMu   sync.Mutex
+	statuses   map[string]*FeedStatus
+	lastManual map[string]time.Time // end of each feed's last manual run
+
+	// currentFeeds returns the live configuration's feed map (store.Get().Feeds
+	// in production). It is read-only: the snapshot is shared with other
+	// readers.
+	currentFeeds func() map[string]*feed.Config
+
+	// now is the clock; replaced in tests
+	now func() time.Time
+
+	// afterRun, when set (tests only, before Run starts), is called on the Run
+	// goroutine after each update with its outcome
+	afterRun func(feedID string, manual bool, res Result, err error)
 }
 
 // KeyProviders builds API key providers from configured tokens and registers
@@ -86,7 +118,13 @@ func NewScheduler(store *config.Store, downloader Downloader, db db.Storage, fs 
 		feeds:      cfg.Feeds,
 		cron:       cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger))),
 		entries:    make(map[string]cron.EntryID),
-		updates:    make(chan string, 16),
+		queue:      newUpdateQueue(),
+		statuses:   make(map[string]*FeedStatus),
+		lastManual: make(map[string]time.Time),
+		currentFeeds: func() map[string]*feed.Config {
+			return store.Get().Feeds
+		},
+		now: time.Now,
 	}, nil
 }
 
@@ -97,7 +135,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	// Initial schedule: feeds without an explicit cron schedule get an
 	// immediate first update
 	implicit := s.rebuildSchedule()
-	s.enqueue(ctx, implicit)
+	s.enqueue(implicit)
 
 	s.cron.Start()
 	defer func() {
@@ -107,45 +145,94 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 	for {
 		select {
-		case feedID := <-s.updates:
-			s.processUpdate(ctx, feedID)
+		case <-s.queue.wake:
+			if err := s.drain(ctx); err != nil {
+				return err
+			}
 		case newCfg := <-s.store.ReloadCh():
-			s.applyReload(ctx, newCfg)
+			s.applyReload(newCfg)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 }
 
+// drain processes queued updates one at a time until the queue is empty. A
+// pending reload is applied before each item so that the item runs with the
+// freshest configuration, and cancellation is honoured between items.
+func (s *Scheduler) drain(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		select {
+		case newCfg := <-s.store.ReloadCh():
+			s.applyReload(newCfg)
+		default:
+		}
+
+		feedID, manual, ok := s.popNext()
+		if !ok {
+			return nil
+		}
+
+		s.processUpdate(ctx, feedID, manual)
+	}
+}
+
 // processUpdate resolves a queued feed ID against the current configuration
 // and runs the update. IDs whose feed was removed by a reload are dropped.
-func (s *Scheduler) processUpdate(ctx context.Context, feedID string) {
+func (s *Scheduler) processUpdate(ctx context.Context, feedID string, manual bool) {
 	feedConfig, ok := s.feeds[feedID]
 	if !ok {
 		log.Debugf("skipping queued update for %q: feed no longer in config", feedID)
+		s.dropStatus(feedID)
 		return
 	}
 
-	if err := s.safeUpdate(ctx, feedConfig); err != nil {
-		log.WithError(err).Errorf("failed to update feed: %s", feedConfig.URL)
-	} else if entryID, ok := s.entries[feedID]; ok {
-		log.Infof("next update of %s: %s", feedID, s.cron.Entry(entryID).Next)
+	// Scheduled runs step aside between episodes when any manual request is
+	// waiting (for this feed too, so it gets a fresh provider lookup); manual
+	// runs always run their batch to the end
+	var shouldYield func() bool
+	if !manual {
+		shouldYield = func() bool { return s.queue.hasManual() }
+	}
+
+	logger := log.WithFields(log.Fields{"feed_id": feedID, "trigger": triggerName(manual)})
+
+	result, err := s.safeUpdate(ctx, feedConfig, shouldYield)
+	s.recordFinish(feedID, manual, result, err)
+	if s.afterRun != nil {
+		s.afterRun(feedID, manual, result, err)
+	}
+
+	switch {
+	case err != nil:
+		logger.WithError(err).Errorf("failed to update feed: %s", feedConfig.URL)
+	case result.Interrupted:
+		logger.Info("update paused for a manual sync request, feed queued again")
+	default:
+		if entryID, ok := s.entries[feedID]; ok {
+			log.Infof("next update of %s: %s", feedID, s.cron.Entry(entryID).Next)
+		}
 	}
 }
 
 // safeUpdate runs a feed update and converts a panic raised inside it (for
 // example a nil dereference in a provider) into an error, so one misbehaving
 // feed cannot kill the daemon or stop the other feeds from updating.
-func (s *Scheduler) safeUpdate(ctx context.Context, feedConfig *feed.Config) (err error) {
+func (s *Scheduler) safeUpdate(ctx context.Context, feedConfig *feed.Config, shouldYield func() bool) (result Result, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.WithField("feed_id", feedConfig.ID).
 				Errorf("panic while updating feed: %v\n%s", r, debug.Stack())
+			result.ErrorCategory = ErrCategoryInternal
 			err = errors.Errorf("panic during update: %v", r)
 		}
 	}()
 
-	return s.manager.Update(ctx, feedConfig)
+	return s.manager.UpdateYielding(ctx, feedConfig, shouldYield)
 }
 
 // applyReload swaps in a new configuration: it rebuilds the key providers and
@@ -153,7 +240,7 @@ func (s *Scheduler) safeUpdate(ctx context.Context, feedConfig *feed.Config) (er
 // map and rebuilds the cron table. On any error the previous configuration
 // stays active. Newly added feeds without an explicit cron schedule are queued
 // for an immediate first update; existing feeds keep their regular cadence.
-func (s *Scheduler) applyReload(ctx context.Context, newCfg *config.Config) {
+func (s *Scheduler) applyReload(newCfg *config.Config) {
 	keys, err := KeyProviders(newCfg.Tokens)
 	if err != nil {
 		log.WithError(err).Error("config reload failed: invalid API tokens, keeping previous configuration")
@@ -170,8 +257,16 @@ func (s *Scheduler) applyReload(ctx context.Context, newCfg *config.Config) {
 	manager.CarryBackoffs(s.manager)
 
 	oldFeeds := s.feeds
+	s.mu.Lock()
 	s.manager = manager
+	s.mu.Unlock()
 	s.feeds = newCfg.Feeds
+
+	known := make(map[string]struct{}, len(newCfg.Feeds))
+	for feedID := range newCfg.Feeds {
+		known[feedID] = struct{}{}
+	}
+	s.pruneStatuses(known)
 
 	implicit := s.rebuildSchedule()
 
@@ -181,7 +276,7 @@ func (s *Scheduler) applyReload(ctx context.Context, newCfg *config.Config) {
 			added = append(added, feedID)
 		}
 	}
-	s.enqueue(ctx, added)
+	s.enqueue(added)
 
 	log.Infof("configuration reloaded: %d feed(s) scheduled, %d new", len(s.entries), len(added))
 }
@@ -213,7 +308,7 @@ func (s *Scheduler) rebuildSchedule() []string {
 
 		entryID, err := s.cron.AddFunc(schedule, func() {
 			log.Debugf("adding %q to update queue", feedID)
-			s.updates <- feedID
+			s.scheduleEnqueue(feedID)
 		})
 		if err != nil {
 			// A bad schedule (e.g. from an admin API edit) must never kill the
@@ -235,26 +330,16 @@ func (s *Scheduler) rebuildSchedule() []string {
 	return implicit
 }
 
-// enqueue queues feed IDs for update from a helper goroutine, because the Run
-// goroutine must never block sending to its own queue (the sends would
-// deadlock once the buffer fills up).
-func (s *Scheduler) enqueue(ctx context.Context, feedIDs []string) {
-	if len(feedIDs) == 0 {
-		return
+// enqueue queues feed IDs for a scheduled update. It never blocks.
+func (s *Scheduler) enqueue(feedIDs []string) {
+	for _, feedID := range feedIDs {
+		s.scheduleEnqueue(feedID)
 	}
-
-	go func() {
-		for _, feedID := range feedIDs {
-			select {
-			case s.updates <- feedID:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
 }
 
-// Close releases the update queue. Call only after Run has exited.
-func (s *Scheduler) Close() {
-	close(s.updates)
+// currentManager returns the live Manager for goroutines other than Run.
+func (s *Scheduler) currentManager() *Manager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.manager
 }

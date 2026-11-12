@@ -66,7 +66,21 @@ type Admin struct {
 	// /admin endpoints. Can also be set via the PODSYNC_ADMIN_TOKEN environment
 	// variable, which takes precedence.
 	Token string `toml:"token"`
+	// MountOnServer serves the admin API and page under /admin/ on the public
+	// web server's listener instead of starting the separate admin listener
+	// (false by default; port and bind_address are then unused). The route
+	// prefix /admin/ is then reserved on that server. Requires local storage,
+	// which is what runs the web server.
+	MountOnServer bool `toml:"mount_on_server"`
+	// AllowConfigEdit enables the routes that rewrite config.toml (PUT and
+	// DELETE under /admin/config and /admin/feeds). When false (the default)
+	// they answer 403; reading the config, reload and manual sync still work.
+	AllowConfigEdit bool `toml:"allow_config_edit"`
 }
+
+// ReservedFeedID is a feed ID that cannot be used: its URL space (/admin/...)
+// belongs to the admin page and API when they are mounted on the web server.
+const ReservedFeedID = "admin"
 
 type Log struct {
 	// Filename to write the log to (instead of stdout)
@@ -160,12 +174,23 @@ func (c *Config) validate() error {
 		}
 	}
 
+	if c.Admin.Enabled && c.Admin.MountOnServer {
+		if c.Storage.Type == "s3" {
+			result = multierror.Append(result, errors.New("admin.mount_on_server requires local storage: the web server does not run with s3 storage"))
+		}
+		if strings.EqualFold(strings.Trim(c.Server.Path, "/"), ReservedFeedID) {
+			result = multierror.Append(result, errors.Errorf("server.path must not be %q when admin.mount_on_server is set", ReservedFeedID))
+		}
+	}
+
 	if len(c.Feeds) == 0 {
 		result = multierror.Append(result, errors.New("at least one feed must be specified"))
 	}
 
 	for id, f := range c.Feeds {
-		if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\`) {
+		if strings.EqualFold(id, ReservedFeedID) {
+			result = multierror.Append(result, errors.Errorf("feed ID %q is reserved for the admin interface", id))
+		} else if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\`) {
 			result = multierror.Append(result, errors.Errorf("invalid feed ID %q: must not be empty, \".\" or \"..\" or contain path separators", id))
 		} else if !feedIDRegex.MatchString(id) {
 			log.Warnf("feed ID %q may produce unusable file names or URLs; use only letters, digits, '.', '_' and '-'", id)
