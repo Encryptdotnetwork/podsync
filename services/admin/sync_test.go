@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -29,6 +30,29 @@ type fakeSyncer struct {
 	syncErr  error
 	allErr   error
 	allReply update.SyncAllResult
+
+	failedErr   error
+	failedReply update.FailedEpisodeList
+	retryErr    error
+}
+
+func (f *fakeSyncer) FailedEpisodes(_ context.Context, feedID string) (update.FailedEpisodeList, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, "failed:"+feedID)
+	return f.failedReply, f.failedErr
+}
+
+func (f *fakeSyncer) RetryEpisode(feedID, episodeID string) (update.FeedStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, "retry:"+feedID+"/"+episodeID)
+	if f.retryErr != nil {
+		return update.FeedStatus{ID: feedID, State: update.StateIdle}, f.retryErr
+	}
+	return update.FeedStatus{ID: feedID, State: update.StateQueued, Trigger: update.TriggerManual}, nil
 }
 
 func (f *fakeSyncer) SyncNow(feedID string) (update.FeedStatus, error) {
@@ -66,7 +90,7 @@ func (f *fakeSyncer) callList() []string {
 // fills in the wildcards.
 func concretePath(pattern string) (method, path string) {
 	method, path, _ = strings.Cut(pattern, " ")
-	path = strings.NewReplacer("{id}", "A", "{section}", "server", "{$}", "").Replace(path)
+	path = strings.NewReplacer("{id}", "A", "{section}", "server", "{episode}", "e1", "{$}", "").Replace(path)
 	return method, path
 }
 
@@ -95,7 +119,7 @@ func TestEveryAPIRouteRequiresAuth(t *testing.T) {
 		}
 	}
 
-	assert.GreaterOrEqual(t, checked, 11, "all API routes must be covered")
+	assert.GreaterOrEqual(t, checked, 13, "all API routes must be covered")
 	assert.Empty(t, syncer.callList(), "nothing may reach the scheduler without a valid token")
 }
 
@@ -148,12 +172,14 @@ func TestSyncFeedRefusedIs429WithRetryAfter(t *testing.T) {
 // An error from the scheduler is logged but never echoed to the client.
 func TestSyncErrorsNeverLeakDetails(t *testing.T) {
 	leaky := errors.New("provider said no: https://example.test/api?key=SECRET")
-	syncer := &fakeSyncer{syncErr: leaky, allErr: leaky}
+	syncer := &fakeSyncer{syncErr: leaky, allErr: leaky, failedErr: leaky, retryErr: leaky}
 	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, syncer)
 
 	for _, target := range []struct{ method, path string }{
 		{http.MethodPost, "/admin/feeds/A/sync"},
 		{http.MethodPost, "/admin/sync"},
+		{http.MethodGet, "/admin/feeds/A/episodes/failed"},
+		{http.MethodPost, "/admin/feeds/A/episodes/e1/retry"},
 	} {
 		rec := env.do(t, target.method, target.path, "", bearer)
 		assert.Equal(t, http.StatusInternalServerError, rec.Code, target.path)
@@ -222,6 +248,8 @@ func TestSyncRoutesWithoutSchedulerAre503(t *testing.T) {
 		{http.MethodPost, "/admin/feeds/A/sync"},
 		{http.MethodPost, "/admin/sync"},
 		{http.MethodGet, "/admin/sync"},
+		{http.MethodGet, "/admin/feeds/A/episodes/failed"},
+		{http.MethodPost, "/admin/feeds/A/episodes/e1/retry"},
 	} {
 		rec := env.do(t, target.method, target.path, "", bearer)
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, target.path)
@@ -277,12 +305,12 @@ func TestAdminRoutesAvoidPublicRouterPatterns(t *testing.T) {
 	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, &fakeSyncer{})
 
 	routes := env.srv.Routes()
-	require.GreaterOrEqual(t, len(routes), 15)
+	require.GreaterOrEqual(t, len(routes), 17)
 
 	for _, pattern := range routes {
 		_, path := concretePath(pattern)
 		for _, id := range []string{"ID6", "feed.xml", "x.mp3", "UC123"} {
-			sample := strings.ReplaceAll(strings.ReplaceAll(pattern, "{id}", id), "{section}", "server")
+			sample := strings.NewReplacer("{id}", id, "{section}", "server", "{episode}", id).Replace(pattern)
 			_, sample = concretePath(strings.ReplaceAll(sample, "{$}", ""))
 			assert.False(t, public.MatchString(sample), "%s matches the public router", sample)
 		}
@@ -293,4 +321,106 @@ func TestAdminRoutesAvoidPublicRouterPatterns(t *testing.T) {
 	for _, asset := range []string{"/admin/", "/admin/admin.js", "/admin/admin.css"} {
 		assert.False(t, public.MatchString(asset), asset)
 	}
+}
+
+func TestFailedEpisodes(t *testing.T) {
+	failedAt := time.Date(2026, 11, 23, 23, 39, 24, 0, time.UTC)
+	syncer := &fakeSyncer{failedReply: update.FailedEpisodeList{
+		FeedID:  "A",
+		Version: "2026.11.23",
+		Episodes: []update.FailedEpisode{{
+			ID: "e1", Title: "Title", Retries: 5, FirstFailedAt: failedAt, LastFailedAt: failedAt,
+			FailedVersion: "2026.10.21", State: "due",
+		}},
+	}}
+	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, syncer)
+
+	rec := env.do(t, http.MethodGet, "/admin/feeds/A/episodes/failed", "", bearer)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+
+	var got update.FailedEpisodeList
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, syncer.failedReply, got)
+	assert.Equal(t, []string{"failed:A"}, syncer.callList())
+	assert.NotContains(t, rec.Body.String(), "next_attempt_at", "zero times are omitted")
+}
+
+func TestFailedEpisodesUnknownFeedIs404(t *testing.T) {
+	syncer := &fakeSyncer{failedErr: update.ErrUnknownFeed}
+	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, syncer)
+
+	rec := env.do(t, http.MethodGet, "/admin/feeds/NOPE/episodes/failed", "", bearer)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestRetryEpisodeAccepted(t *testing.T) {
+	syncer := &fakeSyncer{}
+	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, syncer)
+
+	rec := env.do(t, http.MethodPost, "/admin/feeds/A/episodes/P2R7eUfmJUE/retry", "", bearer)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var got struct {
+		FeedID    string            `json:"feed_id"`
+		EpisodeID string            `json:"episode_id"`
+		Queued    bool              `json:"queued"`
+		Reason    string            `json:"reason"`
+		Status    update.FeedStatus `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "A", got.FeedID)
+	assert.Equal(t, "P2R7eUfmJUE", got.EpisodeID)
+	assert.True(t, got.Queued)
+	assert.Empty(t, got.Reason)
+	assert.Equal(t, update.StateQueued, got.Status.State)
+	assert.Equal(t, []string{"retry:A/P2R7eUfmJUE"}, syncer.callList())
+}
+
+// The reset happened even when the sync was refused, so the answer is still
+// 202, with the refusal reason; the next update tries the episode.
+func TestRetryEpisodeWithRefusedSyncIsAccepted(t *testing.T) {
+	until := time.Now().Add(20 * time.Second).UTC().Truncate(time.Second)
+	syncer := &fakeSyncer{retryErr: &update.RefusedError{Reason: update.ReasonTooSoon, RetryAfter: until}}
+	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, syncer)
+
+	rec := env.do(t, http.MethodPost, "/admin/feeds/A/episodes/e1/retry", "", bearer)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var got struct {
+		Queued     bool      `json:"queued"`
+		Reason     string    `json:"reason"`
+		RetryAfter time.Time `json:"retry_after"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.False(t, got.Queued)
+	assert.Equal(t, update.ReasonTooSoon, got.Reason)
+	assert.True(t, until.Equal(got.RetryAfter))
+}
+
+func TestRetryEpisodeErrors(t *testing.T) {
+	for name, tt := range map[string]struct {
+		err  error
+		code int
+	}{
+		"unknown feed":    {update.ErrUnknownFeed, http.StatusNotFound},
+		"unknown episode": {update.ErrUnknownEpisode, http.StatusNotFound},
+		"not failed":      {update.ErrEpisodeNotFailed, http.StatusConflict},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, &fakeSyncer{retryErr: tt.err})
+
+			rec := env.do(t, http.MethodPost, "/admin/feeds/A/episodes/e1/retry", "", bearer)
+			assert.Equal(t, tt.code, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+// Retrying an episode is not a config edit: it works without allow_config_edit.
+func TestRetryEpisodeNeedsNoConfigEdit(t *testing.T) {
+	syncer := &fakeSyncer{}
+	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken, AllowConfigEdit: false}, syncer)
+
+	rec := env.do(t, http.MethodPost, "/admin/feeds/A/episodes/e1/retry", "", bearer)
+	assert.Equal(t, http.StatusAccepted, rec.Code)
 }

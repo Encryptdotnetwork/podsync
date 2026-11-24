@@ -109,7 +109,7 @@ func NewScheduler(store *config.Store, downloader Downloader, db db.Storage, fs 
 		return nil, err
 	}
 
-	return &Scheduler{
+	s := &Scheduler{
 		store:      store,
 		downloader: downloader,
 		db:         db,
@@ -125,7 +125,15 @@ func NewScheduler(store *config.Store, downloader Downloader, db db.Storage, fs 
 			return store.Get().Feeds
 		},
 		now: time.Now,
-	}, nil
+	}
+	manager.now = s.clock
+	return s, nil
+}
+
+// clock reads s.now at call time, so a Manager built with it follows a clock
+// that tests replace after construction.
+func (s *Scheduler) clock() time.Time {
+	return s.now()
 }
 
 // Run builds the schedule, starts the cron and processes feed updates and
@@ -255,6 +263,7 @@ func (s *Scheduler) applyReload(newCfg *config.Config) {
 
 	// Active 429 cool-downs must survive the reload
 	manager.CarryBackoffs(s.manager)
+	manager.now = s.clock
 
 	oldFeeds := s.feeds
 	s.mu.Lock()

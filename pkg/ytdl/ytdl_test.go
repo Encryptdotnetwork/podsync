@@ -129,3 +129,19 @@ func TestBuildArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestSetVersion(t *testing.T) {
+	dl := &YoutubeDl{}
+	assert.Empty(t, dl.Version())
+
+	// --version output ends with a newline
+	dl.setVersion("2026.10.21\n")
+	assert.Equal(t, "2026.10.21", dl.Version())
+
+	// Empty output (a failed read) keeps the known version
+	dl.setVersion("  \n")
+	assert.Equal(t, "2026.10.21", dl.Version())
+
+	dl.setVersion("2026.11.23\n")
+	assert.Equal(t, "2026.11.23", dl.Version())
+}

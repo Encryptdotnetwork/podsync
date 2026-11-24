@@ -104,8 +104,28 @@ type gateDownloader struct {
 	mu    sync.Mutex
 	gates map[string]*gate
 	calls []string
-	// fail maps "feed/episode" to a download error; set before Run starts
+	// fail maps "feed/episode" to a download error; set before Run starts or
+	// change it with setFail
 	fail map[string]error
+	// version is what Version reports
+	version string
+}
+
+func (d *gateDownloader) setFail(key string, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err == nil {
+		delete(d.fail, key)
+		return
+	}
+	d.fail[key] = err
+}
+
+func (d *gateDownloader) Version() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.version
 }
 
 func (d *gateDownloader) addGate(feedID, episodeID string) *gate {
@@ -133,7 +153,10 @@ func (d *gateDownloader) Download(ctx context.Context, cfg *feed.Config, episode
 			return nil, ctx.Err()
 		}
 	}
-	if err := d.fail[key]; err != nil {
+	d.mu.Lock()
+	err := d.fail[key]
+	d.mu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	return io.NopCloser(strings.NewReader("media-" + key)), nil

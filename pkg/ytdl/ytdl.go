@@ -79,6 +79,9 @@ type YoutubeDl struct {
 	path     string
 	timeout  time.Duration
 	execLock sync.RWMutex // Read-locked by regular invocations, write-locked during self update
+
+	versionMu sync.Mutex
+	version   string // reported by --version at startup and after each self update
 }
 
 func New(ctx context.Context, cfg Config) (*YoutubeDl, error) {
@@ -120,7 +123,8 @@ func New(ctx context.Context, cfg Config) (*YoutubeDl, error) {
 		return nil, errors.Wrap(err, "could not find youtube-dl")
 	}
 
-	log.Infof("using youtube-dl %s", version)
+	ytdl.setVersion(version)
+	log.Infof("using youtube-dl %s", ytdl.Version())
 
 	if err := ytdl.ensureDependencies(ctx); err != nil {
 		return nil, err
@@ -196,7 +200,40 @@ func (dl *YoutubeDl) Update(ctx context.Context) error {
 	}
 
 	log.Info(output)
+
+	// The exec lock is still held, so no download can run with the new binary
+	// before the version is known
+	version, err := dl.exec(ctx, "--version")
+	if err != nil {
+		log.WithError(err).Error("could not read the youtube-dl version after the update")
+		return nil
+	}
+	dl.setVersion(version)
 	return nil
+}
+
+// Version returns the youtube-dl version reported at startup or after the
+// latest self update.
+func (dl *YoutubeDl) Version() string {
+	dl.versionMu.Lock()
+	defer dl.versionMu.Unlock()
+	return dl.version
+}
+
+// setVersion records the output of --version and logs a change.
+func (dl *YoutubeDl) setVersion(output string) {
+	version := strings.TrimSpace(output)
+	if version == "" {
+		return
+	}
+
+	dl.versionMu.Lock()
+	defer dl.versionMu.Unlock()
+
+	if dl.version != "" && dl.version != version {
+		log.Infof("youtube-dl version changed from %s to %s", dl.version, version)
+	}
+	dl.version = version
 }
 
 // PlaylistMetadata fetches playlist-level metadata only (title, thumbnails, channel).

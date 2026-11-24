@@ -539,3 +539,82 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, _ *http.Request) {
 
 	writeJSON(w, http.StatusOK, s.syncer.Status())
 }
+
+// Fixed messages for the episode routes.
+const (
+	msgEpisodesFailed   = "could not list failed episodes"
+	msgRetryFailed      = "episode retry failed"
+	msgEpisodeNotFailed = "episode download has not failed"
+)
+
+// handleFailedEpisodes lists the episodes of one feed whose latest download
+// failed, with their retry state: 200, or 404 for an unknown feed.
+func (s *Server) handleFailedEpisodes(w http.ResponseWriter, r *http.Request) {
+	if s.syncer == nil {
+		writeError(w, http.StatusServiceUnavailable, msgSyncUnavailable)
+		return
+	}
+
+	list, err := s.syncer.FailedEpisodes(r.Context(), r.PathValue("id"))
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, list)
+	case errors.Is(err, update.ErrUnknownFeed):
+		writeError(w, http.StatusNotFound, "feed not found")
+	default:
+		log.WithError(err).Error("listing failed episodes failed")
+		writeError(w, http.StatusInternalServerError, msgEpisodesFailed)
+	}
+}
+
+// episodeRetry is the body of a 202 answer to an episode retry request.
+type episodeRetry struct {
+	FeedID    string `json:"feed_id"`
+	EpisodeID string `json:"episode_id"`
+	// Queued is true when a manual sync of the feed is queued (or already
+	// was). When the sync was refused, Reason and RetryAfter say why and the
+	// episode is tried by the next update that runs.
+	Queued     bool              `json:"queued"`
+	Reason     string            `json:"reason,omitempty"`
+	RetryAfter time.Time         `json:"retry_after,omitzero"`
+	Status     update.FeedStatus `json:"status"`
+}
+
+// handleRetryEpisode forgets the failed download attempts of one episode and
+// queues a manual sync of its feed. The answer is 202 once the episode was
+// reset, even if the sync itself was refused (the next update then tries it);
+// 404 for an unknown feed or episode; 409 if the episode has not failed.
+func (s *Server) handleRetryEpisode(w http.ResponseWriter, r *http.Request) {
+	if s.syncer == nil {
+		writeError(w, http.StatusServiceUnavailable, msgSyncUnavailable)
+		return
+	}
+
+	var (
+		feedID    = r.PathValue("id")
+		episodeID = r.PathValue("episode")
+	)
+
+	status, err := s.syncer.RetryEpisode(feedID, episodeID)
+	answer := episodeRetry{FeedID: feedID, EpisodeID: episodeID, Status: status}
+
+	var refused *update.RefusedError
+	switch {
+	case err == nil:
+		answer.Queued = true
+		writeJSON(w, http.StatusAccepted, answer)
+	case errors.As(err, &refused):
+		answer.Reason = refused.Reason
+		answer.RetryAfter = refused.RetryAfter
+		writeJSON(w, http.StatusAccepted, answer)
+	case errors.Is(err, update.ErrUnknownFeed):
+		writeError(w, http.StatusNotFound, "feed not found")
+	case errors.Is(err, update.ErrUnknownEpisode):
+		writeError(w, http.StatusNotFound, "episode not found")
+	case errors.Is(err, update.ErrEpisodeNotFailed):
+		writeError(w, http.StatusConflict, msgEpisodeNotFailed)
+	default:
+		log.WithError(err).Error("episode retry request failed")
+		writeError(w, http.StatusInternalServerError, msgRetryFailed)
+	}
+}

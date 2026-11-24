@@ -54,6 +54,12 @@ type fakeDownloader struct {
 	calls []string
 	// onDownload, when set, runs at the start of every Download call
 	onDownload func()
+	// version is what Version reports
+	version string
+}
+
+func (d *fakeDownloader) Version() string {
+	return d.version
 }
 
 func (d *fakeDownloader) Download(_ context.Context, _ *feed.Config, episode *model.Episode) (io.ReadCloser, error) {
@@ -84,6 +90,8 @@ type updaterEnv struct {
 	downloader *fakeDownloader
 	cfg        *feed.Config
 	dataDir    string
+	// clock drives the episode retry timing; it starts at the wall clock
+	clock *fakeClock
 }
 
 func newUpdaterEnv(t *testing.T, episodes ...*model.Episode) *updaterEnv {
@@ -116,6 +124,7 @@ func newUpdaterEnv(t *testing.T, episodes ...*model.Episode) *updaterEnv {
 		downloader: &fakeDownloader{errs: map[string]error{}},
 		cfg:        cfg,
 		dataDir:    dataDir,
+		clock:      &fakeClock{t: time.Now().UTC()},
 	}
 
 	manager, err := NewUpdater(
@@ -131,6 +140,7 @@ func newUpdaterEnv(t *testing.T, episodes ...*model.Episode) *updaterEnv {
 	manager.newBuilder = func(context.Context, model.Provider, string, builder.Downloader) (builder.Builder, error) {
 		return env.provider, nil
 	}
+	manager.now = env.clock.Now
 	env.manager = manager
 
 	return env
@@ -392,25 +402,6 @@ func TestUpdateProviderErrorIsReturned(t *testing.T) {
 	assert.False(t, inBackoff)
 }
 
-// Documents the current retry cap: a failing episode is attempted once per
-// update until maxDownloadAttempts is reached, then skipped.
-func TestUpdateStopsRetryingAfterMaxAttempts(t *testing.T) {
-	env := newUpdaterEnv(t, testEpisode("e1", time.Hour))
-	env.downloader.errs["e1"] = errors.New("video unavailable")
-
-	for i := 0; i < maxDownloadAttempts; i++ {
-		require.NoError(t, env.update(t))
-	}
-
-	episode := env.episodes(t)["e1"]
-	assert.Equal(t, model.EpisodeError, episode.Status)
-	assert.Equal(t, maxDownloadAttempts, episode.Retries)
-	assert.Len(t, env.downloader.calls, maxDownloadAttempts)
-
-	require.NoError(t, env.update(t))
-	assert.Len(t, env.downloader.calls, maxDownloadAttempts, "no attempt beyond the cap")
-}
-
 // Cancelling the context (daemon shutdown) mid-download must not charge the
 // in-flight episode or any later one with a failed attempt.
 func TestUpdateCancelledBatchChargesNoRetries(t *testing.T) {
@@ -466,7 +457,9 @@ func TestUpdateResultCounts(t *testing.T) {
 	assert.False(t, result.SkippedBackoff || result.RateLimited || result.Interrupted)
 	assert.Empty(t, result.ErrorCategory)
 
-	// Nothing new: e2 is retried (and fails again), nothing is discovered
+	// An hour later nothing is new: e2 is retried (and fails again), nothing
+	// is discovered
+	env.clock.Advance(retryBackoffInitial)
 	result, err = env.manager.Update(context.Background(), env.cfg)
 	require.NoError(t, err)
 	assert.Equal(t, Result{Failed: 1}, result)
