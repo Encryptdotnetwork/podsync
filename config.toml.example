@@ -187,6 +187,15 @@ vimeo = [ # Multiple keys will be rotated.
   max_height = 720
   opml = true
 
+  # Local JSON playlist feed example (no API key required, e.g. written by PodSync Scout)
+  [feeds.AutoPodcasts]
+  url = "file:///app/scout/AutoPodcasts.json"
+  page_size = 100
+  update_period = "1h"
+  quality = "high"
+  format = "audio"
+  clean = { keep_last = 30 }
+
 # Podsync uses local database to store feeds and episodes metadata.
 # This section is optional and usually not needed to configure unless some very specific corner cases.
 # Refer to https://dgraph.io/docs/badger/get-started/#memory-usage for documentation.
