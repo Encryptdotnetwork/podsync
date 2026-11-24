@@ -2,6 +2,7 @@ package builder
 
 import (
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -16,6 +17,19 @@ func ParseURL(link string) (model.Info, error) {
 	}
 
 	info := model.Info{}
+
+	if parsed.Scheme == "file" {
+		filePath, err := parseLocalJSONURL(parsed)
+		if err != nil {
+			return model.Info{}, err
+		}
+
+		info.Provider = model.ProviderLocalJSON
+		info.LinkType = model.TypePlaylist
+		info.ItemID = filePath
+
+		return info, nil
+	}
 
 	if strings.HasSuffix(parsed.Host, "youtube.com") {
 		kind, id, err := parseYoutubeURL(parsed)
@@ -99,7 +113,8 @@ func ParseURL(link string) (model.Info, error) {
 }
 
 func parseURL(link string) (*url.URL, error) {
-	if !strings.HasPrefix(link, "http") {
+	lower := strings.ToLower(link)
+	if !strings.HasPrefix(lower, "http") && !strings.HasPrefix(lower, "file://") {
 		link = "https://" + link
 	}
 
@@ -109,6 +124,43 @@ func parseURL(link string) (*url.URL, error) {
 	}
 
 	return parsed, nil
+}
+
+func parseLocalJSONURL(parsed *url.URL) (string, error) {
+	if parsed.Host != "" && parsed.Host != "localhost" {
+		return "", errors.Errorf("unsupported file URL host: %s", parsed.Host)
+	}
+
+	rawPath := parsed.Path
+	if rawPath == "" {
+		return "", errors.New("empty file URL path")
+	}
+
+	// Reject any path traversal segments before cleaning
+	for _, seg := range strings.Split(strings.ReplaceAll(rawPath, `\`, "/"), "/") {
+		if seg == ".." {
+			return "", errors.New("file URL path must not contain '..'")
+		}
+	}
+
+	// Normalize file:///C:/... on Windows to C:/...
+	if len(rawPath) >= 3 && rawPath[0] == '/' &&
+		((rawPath[1] >= 'A' && rawPath[1] <= 'Z') || (rawPath[1] >= 'a' && rawPath[1] <= 'z')) &&
+		rawPath[2] == ':' {
+		rawPath = rawPath[1:]
+	}
+
+	isUnixAbs := strings.HasPrefix(rawPath, "/")
+	cleanPath := filepath.Clean(filepath.FromSlash(rawPath))
+	if !filepath.IsAbs(cleanPath) && !isUnixAbs {
+		return "", errors.New("file URL path must be absolute")
+	}
+
+	if !strings.EqualFold(filepath.Ext(cleanPath), ".json") {
+		return "", errors.New("file URL must point to a .json file")
+	}
+
+	return cleanPath, nil
 }
 
 func parseYoutubeURL(parsed *url.URL) (model.Type, string, error) {

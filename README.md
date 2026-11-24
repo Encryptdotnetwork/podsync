@@ -2,220 +2,188 @@
 
 ![Podsync](docs/img/logo.png)
 
-[![](https://github.com/mxpv/podsync/workflows/CI/badge.svg)](https://github.com/mxpv/podsync/actions?query=workflow%3ACI)
-[![Nightly](https://github.com/mxpv/podsync/actions/workflows/nightly.yml/badge.svg)](https://github.com/mxpv/podsync/actions/workflows/nightly.yml)
-[![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/mxpv/podsync)](https://github.com/mxpv/podsync/releases)
-[![Go Report Card](https://goreportcard.com/badge/github.com/mxpv/podsync)](https://goreportcard.com/report/github.com/mxpv/podsync)
-[![GitHub Sponsors](https://img.shields.io/github/sponsors/mxpv)](https://github.com/sponsors/mxpv)
-[![Patreon](https://img.shields.io/badge/support-patreon-E6461A.svg)](https://www.patreon.com/podsync)
+[![CI](https://github.com/Encryptdotnetwork/podsync/actions/workflows/ci.yml/badge.svg)](https://github.com/Encryptdotnetwork/podsync/actions?query=workflow%3ACI)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Podsync - is a simple, free service that lets you listen to any YouTube, Vimeo, Odysee, or Rumble channels, playlists or user videos in
-podcast format.
+Podsync converts YouTube, Vimeo, Odysee, Rumble, SoundCloud, Twitch, and local JSON playlist sources into RSS podcast feeds so you can download, sync, and listen to episodes offline in any podcast client.
 
-Podcast applications have a rich functionality for content delivery - automatic download of new episodes,
-remembering last played position, sync between devices and offline listening. This functionality is not available
-on YouTube and Vimeo. So the aim of Podsync is to make your life easier and enable you to view/listen to content on
-any device in podcast client.
+> **Fork Notice:** Maintained fork of [`mxpv/podsync`](https://github.com/mxpv/podsync) adding **Odysee**, **Rumble**, and **Local JSON** feed support, an **Admin API & Web UI** (live hot-reload, **Sync now**, failed-episode retry, and episode purge), **time-based retry backoff**, **custom filename templates + migration**, hardened non-root Docker execution, and the optional [**PodSync Scout**](./scout/README.md) companion service.
 
-> **Note:** This fork adds support for **Odysee** and **Rumble** platform downloads.
-> See [Configuration](#-configuration) below for details.
+---
 
 ## ✨ Features
 
-- Works with YouTube, Vimeo, Odysee, and Rumble.
-- Supports SoundCloud and Twitch.
-- Supports feeds configuration: video/audio, high/low quality, max video height, etc.
-- mp3 encoding
-- Update scheduler supports cron expressions
-- Episodes filtering (match by title, duration).
-- Feeds customizations (custom artwork, category, language, etc).
-- OPML export.
-- Supports episodes cleanup (keep last X episodes).
-- Configurable hooks for custom integrations and workflows.
-- One-click deployment for AWS.
-- Runs on Windows, Mac OS, Linux, and Docker.
-- Supports ARM.
-- Automatic yt-dlp self update.
-- Supports API keys rotation.
+- **Platforms:** YouTube (channels, handles, playlists), Vimeo, Odysee, Rumble (channels, playlists, single videos), SoundCloud playlists, Twitch archives, and local read-only JSON feeds (`file:///...json`).
+- **Media & Encoding:** Configurable audio/video format, quality (`high`/`low`), `max_height`, custom `yt-dlp` formats/args, MP3 encoding, and automatic `yt-dlp` self-updates.
+- **Scheduling & Reliability:** Per-feed `update_period` or `cron_schedule`, HTTP 429 exponential rate-limit backoff, and time-based episode download retry backoff (automatically resets when `yt-dlp` updates).
+- **Admin API & Web UI (`/admin/`):**
+  - **Sync now:** Trigger immediate manual updates for one or all feeds with live sync status.
+  - **Failed episode management:** Inspect failed downloads with retry schedules and trigger immediate per-episode retries.
+  - **Episode deletion/purge:** Remove unwanted downloaded media files and rebuild the RSS feed immediately (`DELETE /admin/feeds/{id}/episodes/{episode}`).
+  - **Config hot-reload:** Optional runtime config management with atomic TOML writes, ETag concurrency control, and read-only default (`allow_config_edit = false`).
+- **Filtering & Customization:** Regex title/description include/exclude filters, min/max duration and age filters ([docs/filters.md](./docs/filters.md)), custom RSS metadata/artwork, OPML export, rolling cleanup (`keep_last`), configurable `filename_template`, and download/error exec hooks.
+- **Companion Service (`scout/`):** Optional [PodSync Scout](./scout/README.md) container for automated YouTube interview discovery with local Ollama spam filtering, English-only filtering, same-channel clip detection, and a LAN triage UI.
+- **Hardened Docker Runtime:** Runs as non-root UID/GID `10001`, supports a read-only root filesystem, strict CSP / DOM-safe web UI, and an SSRF-protected image-only `/thumbnail` proxy.
+
+---
 
 ## 📋 Dependencies
 
-If you're running the CLI as binary (e.g. not via Docker), you need to make sure that dependencies are available on
-your system. Currently, Podsync depends on `yt-dlp` ,  `ffmpeg`, and `go`.
+When running from source (outside Docker), install `yt-dlp`, `ffmpeg`, and `go`:
 
-On Mac you can install those with `brew`:
-```
+```bash
 brew install yt-dlp ffmpeg go
 ```
 
+---
+
 ## 📖 Documentation
 
-- [How to get Vimeo API token](./docs/how_to_get_vimeo_token.md)
-- [How to get YouTube API Key](./docs/how_to_get_youtube_api_key.md)
-- [Podsync on QNAP NAS Guide](./docs/how_to_setup_podsync_on_qnap_nas.md)
-- [Schedule updates with cron](./docs/cron.md)
+- [Episode Filters Guide](./docs/filters.md)
+- [Schedule Updates with Cron](./docs/cron.md)
+- [How to Get a YouTube API Key](./docs/how_to_get_youtube_api_key.md)
+- [How to Get a Vimeo API Token](./docs/how_to_get_vimeo_token.md)
+- [PodSync Scout Companion Service](./scout/README.md)
+- [Podsync on QNAP NAS](./docs/how_to_setup_podsync_on_qnap_nas.md)
+- [Podsync on Synology NAS](./docs/how_to_setup_podsync_on_synology_nas.md)
 
-## 🌙 Nightly builds
+---
 
-Nightly builds uploaded every midnight from the `main` branch and available for testing:
+## 🔑 Platform Tokens
 
-```bash
-$ docker run -it --rm ghcr.io/mxpv/podsync:nightly
-```
+- **YouTube:** YouTube Data API v3 key (supports space-separated keys for rotation)
+- **Vimeo:** Vimeo access token
+- **Twitch:** `CLIENT_ID:CLIENT_SECRET`
+- **Odysee, Rumble, SoundCloud, Local JSON:** No API key required
 
-### 🔑 Access tokens
-
-Some platforms require API tokens:
-
-- **YouTube**: [How to get YouTube API key](https://elfsight.com/blog/2016/12/how-to-get-youtube-api-key-tutorial/)
-- **Vimeo**: [Generate an access token for Vimeo](https://developer.vimeo.com/api/guides/start#generate-access-token)
-- **Odysee**: No API key required - public RSS feeds
-- **Rumble**: No API key required - public channels and videos
-- **SoundCloud**: No API key required - public feeds
-- **Twitch**: Requires Client ID and Client Secret
+---
 
 ## ⚙️ Configuration
 
-You need to create a configuration file (for instance `config.toml`) and specify the list of feeds that you're going to host.
-See [config.toml.example](./config.toml.example) for all possible configuration keys available in Podsync.
-
-Minimal configuration would look like this:
+Create a `config.toml` file (see [config.toml.example](./config.toml.example) for all keys). Minimal example:
 
 ```toml
 [server]
 port = 8080
+hostname = "https://podsync.example.com"
+no_index = true
 
 [storage]
   [storage.local]
-  # Don't change if you run podsync via docker
-  data_dir = "/app/data/"
+  data_dir = "/app/data"
 
 [tokens]
-youtube = "PASTE YOUR API KEY HERE" # See config.toml.example for environment variables
-
-[feeds]
-    [feeds.ID1]
-    url = "https://www.youtube.com/channel/UCxC5Ls6DwqV0e-CYcAKkExQ"
-
-    # Odysee example (no API key required)
-    [feeds.ID2]
-    url = "https://odysee.com/@lbry:3f"
-
-    [feeds.ID3]
-    url = "https://odysee.com/@theduran:e"
-
-    # Rumble example (no API key required)
-    [feeds.ID4]
-    url = "https://rumble.com/c/TimPool"
-
-    [feeds.ID5]
-    url = "https://rumble.com/c/OfficialLouiseFarrakhan"
-```
-
-If you want to hide Podsync behind reverse proxy like nginx, you can use `hostname` field:
-
-```toml
-[server]
-port = 8080
-hostname = "https://my.test.host:4443"
+youtube = "PASTE_YOUR_API_KEY_HERE" # Prefer PODSYNC_YOUTUBE_API_KEY env var
 
 [feeds]
   [feeds.ID1]
-  ...
+  url = "https://www.youtube.com/channel/UCxC5Ls6DwqV0e-CYcAKkExQ"
+  update_period = "1h"
+  quality = "high"
+  format = "audio"
+
+  # Odysee example (no API key required)
+  [feeds.ID2]
+  url = "https://odysee.com/@example:1"
+
+  # Rumble example (no API key required)
+  [feeds.ID3]
+  url = "https://rumble.com/c/example"
+
+  # Local JSON playlist feed (e.g. written by PodSync Scout, no API key required)
+  [feeds.AutoPodcasts]
+  url = "file:///app/scout/AutoPodcasts.json"
+  page_size = 100
+  update_period = "1h"
+  quality = "high"
+  format = "audio"
+  clean = { keep_last = 30 }
+
+[admin]
+enabled = true
+mount_on_server = true    # Serves /admin/ on server.port; set false to listen on admin.port (8095)
+allow_config_edit = false # Keep false unless you want config.toml editable via the API
 ```
 
-Server will be accessible from `http://localhost:8080`, but episode links will point to `https://my.test.host:4443/ID1/...`
+### 🛡️ Admin API & Web UI
+
+Enable `[admin]` with a bearer token of at least 32 characters via `PODSYNC_ADMIN_TOKEN`. Restrict `/admin/` to your private LAN/VPN at your reverse proxy (never publish it to the public internet).
+
+Key endpoints (all require `Authorization: Bearer <token>` except `/healthz`):
+
+- `GET /admin/` — Web UI for **Sync now**, feed status, and failed episode retries
+- `POST /admin/feeds/{id}/sync`, `POST /admin/sync`, `GET /admin/sync` — Manual sync & live status
+- `GET /admin/feeds/{id}/episodes/failed` — List failed downloads and next retry timestamps
+- `POST /admin/feeds/{id}/episodes/{episode}/retry` — Reset failure backoff and queue immediate retry
+- `DELETE /admin/feeds/{id}/episodes/{episode}` — Delete media file, mark episode cleaned, and rebuild feed XML
+- `GET /admin/config`, `GET /admin/feeds`, `POST /admin/reload` — Read redacted config and hot-reload from disk
+- `PUT/DELETE /admin/config/{section}`, `PUT/DELETE /admin/feeds/{id}` — Live config edits (requires `allow_config_edit = true` and `If-Match` ETag)
 
 ### 🌍 Environment Variables
 
-Podsync supports the following environment variables for configuration and API keys:
+| Variable Name | Description | Example |
+| --- | --- | --- |
+| `PODSYNC_CONFIG_PATH` | Path to `config.toml` (overrides `--config`) | `/app/config/config.toml` |
+| `PODSYNC_ADMIN_TOKEN` | Bearer token for `/admin/*` (min 32 chars, takes precedence over config) | `$(openssl rand -hex 32)` |
+| `PODSYNC_YOUTUBE_API_KEY` | YouTube API key(s), space-separated for rotation | `key1 key2` |
+| `PODSYNC_VIMEO_API_KEY` | Vimeo API key(s), space-separated for rotation | `key1 key2` |
+| `PODSYNC_SOUNDCLOUD_API_KEY` | SoundCloud API key(s), optional | `key1` |
+| `PODSYNC_TWITCH_API_KEY` | Twitch `CLIENT_ID:CLIENT_SECRET` | `id1:secret1` |
 
-| Variable Name                | Description                                                                               | Example Value(s)                              |
-|------------------------------|-------------------------------------------------------------------------------------------|-----------------------------------------------|
-| `PODSYNC_CONFIG_PATH`        | Path to the configuration file (overrides `--config` CLI flag)                            | `/app/config.toml`                            |
-| `PODSYNC_YOUTUBE_API_KEY`    | YouTube API key(s), space-separated for rotation                                          | `key1` or `key1 key2 key3` |
-| `PODSYNC_VIMEO_API_KEY`      | Vimeo API key(s), space-separated for rotation                                            | `key1` or `key1 key2`        |
-| `PODSYNC_SOUNDCLOUD_API_KEY` | SoundCloud API key(s), space-separated for rotation                                       | `soundcloud_key1 soundcloud_key2`             |
-| `PODSYNC_TWITCH_API_KEY`     | Twitch API credentials in the format `CLIENT_ID:CLIENT_SECRET`, space-separated for multi | `id1:secret1 id2:secret2`                     |
-| `PODSYNC_ODYSEE_API_KEY`     | Odysee API key (optional, not required for public feeds)                                  | `key1`                                        |
-| `PODSYNC_RUMBLE_API_KEY`     | Rumble API key (optional, not required for public channels)                              | `key1`                                        |
+---
 
-## 🚀 How to run
+## 🚀 Running Podsync
 
+### Build & Run from Source
 
-### Build and run as binary:
-
-Make sure you have created the file `config.toml`. Also note the location of the `data_dir`. Depending on the operating system, you may have to choose a different location since `/app/data` might be not writable.
-
-```
-$ git clone https://github.com/mxpv/podsync
-$ cd podsync
-$ make
-$ ./bin/podsync --config config.toml
+```bash
+make build
+./bin/podsync --config config.toml
 ```
 
-### 🗂️ One-time filename migration
+### Run via Docker Compose
 
-If you changed `filename_template` and want to migrate already-downloaded files:
+The Docker image runs as UID/GID `10001`. Ensure mounted `data`, `db`, and `logs` directories are writable by `10001:10001`. With a read-only root filesystem, mount an executable `tmpfs` at `/run/yt-dlp` and a writable volume at `/tmp`:
 
-```
-$ ./bin/podsync --config config.toml --migrate-filenames
-```
-
-Preview only (no writes):
-
-```
-$ ./bin/podsync --config config.toml --migrate-filenames --migrate-filenames-dry-run
-```
-
-Note: when `storage.type = "s3"`, only dry-run mode is supported currently. Non-dry-run migration requires readable legacy files and should be run against local storage.
-
-### 🐛 How to debug
-
-Use the editor [Visual Studio Code](https://code.visualstudio.com/) and install the official [Go](https://marketplace.visualstudio.com/items?itemName=golang.go) extension. Afterwards you can execute "Run & Debug" ▶︎ "Debug Podsync" to debug the application. The required configuration is already prepared (see `.vscode/launch.json`).
-
-
-### 🐳 Run via Docker:
-
-```
-$ docker pull ghcr.io/mxpv/podsync:latest
-$ docker run \
-    -p 8080:8080 \
-    -v $(pwd)/data:/app/data/ \
-    -v $(pwd)/db:/app/db/ \
-    -v $(pwd)/config.toml:/app/config.toml \
-    ghcr.io/mxpv/podsync:latest
-```
-
-### 🐳 Run via Docker Compose:
-
-```
-$ cat docker-compose.yml
+```yaml
 services:
   podsync:
-    image: ghcr.io/mxpv/podsync
+    build: .
     container_name: podsync
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PODSYNC_ADMIN_TOKEN: ${PODSYNC_ADMIN_TOKEN}
+      PODSYNC_YOUTUBE_API_KEY: ${PODSYNC_YOUTUBE_API_KEY}
+    tmpfs:
+      - /run/yt-dlp:rw,exec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
     volumes:
-      - ./data:/app/data/
-      - ./db:/app/db/
-      - ./config.toml:/app/config.toml
+      - ./config.toml:/app/config/config.toml:ro
+      - ./db:/app/config/db
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - podsync-tmp:/tmp
     ports:
-      - 8080:8080
+      - "8080:8080"
+    command: ["--config", "/app/config/config.toml"]
 
-$ docker compose up
+volumes:
+  podsync-tmp:
 ```
 
-## 📦 How to make a release
+### 🗂️ Filename Migration
 
-Just push a git tag. CI will do the rest.
+If you change `filename_template` and want to rename existing downloaded files:
+
+```bash
+./bin/podsync --config config.toml --migrate-filenames --migrate-filenames-dry-run
+./bin/podsync --config config.toml --migrate-filenames
+```
+
+---
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Fork Note
-
-This fork adds the following features while maintaining compatibility with upstream `mxpv/podsync`:
-
-- Configurable `filename_template` for downloaded media and RSS enclosure paths
-- Optional one-time filename migration CLI (`--migrate-filenames`, `--migrate-filenames-dry-run`)
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.

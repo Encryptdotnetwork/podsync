@@ -24,6 +24,7 @@ type Syncer interface {
 	Status() update.SyncStatus
 	FailedEpisodes(ctx context.Context, feedID string) (update.FailedEpisodeList, error)
 	RetryEpisode(feedID, episodeID string) (update.FeedStatus, error)
+	DeleteEpisode(ctx context.Context, feedID, episodeID string) error
 }
 
 type Server struct {
@@ -93,6 +94,7 @@ func New(cfg config.Admin, store *config.Store, reload func() error, syncer Sync
 	// Failed episode downloads: list them, or forget one's failures and sync
 	handle("GET /admin/feeds/{id}/episodes/failed", srv.requireAuth(srv.handleFailedEpisodes))
 	handle("POST /admin/feeds/{id}/episodes/{episode}/retry", srv.requireAuth(srv.handleRetryEpisode))
+	handle("DELETE /admin/feeds/{id}/episodes/{episode}", srv.requireAuth(srv.handleDeleteEpisode))
 
 	// The page and its assets are public (no secrets in them); the token is
 	// typed in the browser and sent with each API call. "{$}" matches only

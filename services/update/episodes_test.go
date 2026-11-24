@@ -3,6 +3,8 @@ package update
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -136,4 +138,78 @@ func TestRetryEpisodeRejectsWhatItCannotReset(t *testing.T) {
 
 	assert.Equal(t, before, env.episodes("A"), "nothing changed")
 	assert.False(t, env.s.Status().Busy, "nothing queued")
+}
+
+func TestDeleteEpisodePurgesFileAndRebuildsXML(t *testing.T) {
+	env := failOnce(t)
+	require.Equal(t, model.EpisodeDownloaded, env.episodes("A")["a2"].Status)
+	require.Contains(t, env.xml("A"), "a2.mp3")
+
+	err := env.s.DeleteEpisode(context.Background(), "A", "a2")
+	require.NoError(t, err)
+
+	ep := env.episodes("A")["a2"]
+	assert.Equal(t, model.EpisodeCleaned, ep.Status)
+	assert.Empty(t, ep.Title)
+	assert.Empty(t, ep.Description)
+	assert.NotContains(t, env.xml("A"), "a2.mp3")
+
+	// Deleting again is idempotent.
+	require.NoError(t, env.s.DeleteEpisode(context.Background(), "A", "a2"))
+
+	// A subsequent sync must not re-download the purged episode.
+	env.s.scheduleEnqueue("A")
+	env.waitIdle()
+	assert.Equal(t, model.EpisodeCleaned, env.episodes("A")["a2"].Status)
+	assert.NotContains(t, env.xml("A"), "a2.mp3")
+}
+
+func TestDeleteEpisodeErrors(t *testing.T) {
+	env := failOnce(t)
+
+	assert.ErrorIs(t, env.s.DeleteEpisode(context.Background(), "NOPE", "a2"), ErrUnknownFeed)
+	assert.ErrorIs(t, env.s.DeleteEpisode(context.Background(), "A", "missing"), ErrUnknownEpisode)
+	assert.ErrorIs(t, env.s.DeleteEpisode(context.Background(), "A", "../a2"), ErrUnknownEpisode)
+}
+
+// Deleting an episode that has no media file on disk (EpisodeError / EpisodeNew)
+// must succeed cleanly and mark it EpisodeCleaned instead of failing on ENOENT.
+func TestDeleteEpisodeWithoutFileOnDisk(t *testing.T) {
+	env := failOnce(t)
+	require.Equal(t, model.EpisodeError, env.episodes("A")["a1"].Status)
+
+	err := env.s.DeleteEpisode(context.Background(), "A", "a1")
+	require.NoError(t, err)
+
+	ep := env.episodes("A")["a1"]
+	assert.Equal(t, model.EpisodeCleaned, ep.Status)
+	assert.Empty(t, ep.Title)
+	assert.Zero(t, ep.Retries)
+	assert.NotContains(t, env.xml("A"), "a1.mp3")
+}
+
+// Deleting an episode while its download is in flight must not allow the
+// finishing download to resurrect it as EpisodeDownloaded or leave an orphan file.
+func TestDeleteEpisodeDuringInFlightDownload(t *testing.T) {
+	env := newSyncEnv(t, "A")
+	env.provider.set("A", syncEpisode("a1", 1))
+	g := env.dl.addGate("A", "a1")
+	env.run()
+
+	_, err := env.s.SyncNow("A")
+	require.NoError(t, err)
+
+	// Wait until the download has started, then delete the episode mid-flight.
+	<-g.started
+	require.NoError(t, env.s.DeleteEpisode(context.Background(), "A", "a1"))
+	close(g.release)
+
+	env.waitIdle()
+
+	ep := env.episodes("A")["a1"]
+	assert.Equal(t, model.EpisodeCleaned, ep.Status)
+	assert.Empty(t, ep.Title)
+	assert.NotContains(t, env.xml("A"), "a1.mp3")
+	_, statErr := os.Stat(filepath.Join(env.dataDir, "A", "a1.mp3"))
+	assert.ErrorIs(t, statErr, os.ErrNotExist)
 }

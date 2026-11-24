@@ -336,6 +336,12 @@ debug = false
 - PubDate: the playlist item's upload time when present; otherwise (channels, undated items) the discovery time minus one second per list position, so newest-first listings keep their order. Episodes are stored once, so the date of an existing episode never changes
 - Downloads go through yt-dlp with the individual video URL
 
+### Local JSON (`pkg/builder/localjson.go`)
+- **Supported**: Local absolute JSON feed files (`file:///path/to/feed.json`)
+- No API key required; rejects non-local hosts, `..` path traversal, non-`.json` extensions, and files over 16 MiB
+- Reads feed metadata (`title`, `description`, `author`, `link`, `cover_art`) and `episodes` (`id`, `title`, `description`, `video_url`, `thumbnail`, `duration`, `pub_date`); only `http://` and `https://` episode URLs are accepted and passed to yt-dlp for downloading
+- Empty `episodes` lists are valid (produces an empty feed cleanly)
+
 ### API Key Rotation
 - All platforms support multiple keys for rotation
 - Round-robin rotation via `RotatedKeyProvider` in `pkg/feed/key.go`
@@ -364,6 +370,7 @@ All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy
 - `PUT /admin/config/{section}` - Replace a section (JSON body)
 - `GET /admin/feeds` - Feed summaries; `GET/PUT/DELETE /admin/feeds/{id}` - single feed CRUD
 - `POST /admin/reload` - Re-read config.toml from disk (after hand edits)
+- `DELETE /admin/feeds/{id}/episodes/{episode}` - Delete an episode's media file, mark it cleaned in BadgerDB, and rebuild the feed XML (works without `allow_config_edit`)
 - `POST /admin/feeds/{id}/sync` - Queue a manual update of one feed: 202 (queued or already queued), 404 unknown feed, 429 with `Retry-After` while the feed is rate limited or was manually synced less than 30 seconds ago
 - `POST /admin/sync` - Queue every feed ("Sync all"): 202 with `queued`/`refused` lists, 429 if all were refused
 - `GET /admin/feeds/{id}/episodes/failed` - Episodes whose latest download failed, newest first: retries, first/last failure time, the yt-dlp version of the last failure, `state` (`due`, `waiting` with `next_attempt_at`, or `given_up`) and the installed yt-dlp version. Never raw error text; titles are untrusted provider metadata. 404 for an unknown feed
@@ -582,6 +589,7 @@ This project uses golangci-lint with strict formatting rules configured in `.gol
 - Twitch builder: `pkg/builder/twitch.go`
 - Odysee builder: `pkg/builder/odysee.go`
 - Rumble builder: `pkg/builder/rumble.go`
+- Local JSON builder: `pkg/builder/localjson.go`
 - URL parsing: `pkg/builder/url.go`
 - youtube-dl wrapper: `pkg/ytdl/ytdl.go`
 - Hooks: `pkg/feed/hooks.go`

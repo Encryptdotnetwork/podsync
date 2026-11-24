@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.deps/
+venv/
+.git/
+*.db
+*.db-wal
+*.db-shm
+.env*
+data/
+tests/
+requirements-dev.txt

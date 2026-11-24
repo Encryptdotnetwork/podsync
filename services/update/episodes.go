@@ -3,9 +3,13 @@ package update
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/mxpv/podsync/pkg/feed"
 	"github.com/mxpv/podsync/pkg/model"
 )
 
@@ -118,4 +122,61 @@ func (s *Scheduler) RetryEpisode(feedID, episodeID string) (FeedStatus, error) {
 	}
 
 	return s.SyncNow(feedID)
+}
+
+// DeleteEpisode removes an episode's downloaded media file (if present), marks
+// the episode cleaned in BadgerDB so it is neither served in the RSS feed nor
+// re-downloaded on future updates, and rebuilds the feed XML.
+//
+// It returns ErrUnknownFeed or ErrUnknownEpisode when the feed or episode is
+// not found. Deleting an already-cleaned episode is idempotent. It is safe to
+// call from any goroutine.
+func (s *Scheduler) DeleteEpisode(ctx context.Context, feedID, episodeID string) error {
+	feedConfig, ok := s.currentFeeds()[feedID]
+	if !ok {
+		return ErrUnknownFeed
+	}
+
+	if episodeID == "" || episodeID == "." || episodeID == ".." || strings.ContainsAny(episodeID, `/\`) {
+		return ErrUnknownEpisode
+	}
+
+	ep, err := s.db.GetEpisode(ctx, feedID, episodeID)
+	switch {
+	case errors.Is(err, model.ErrNotFound):
+		return ErrUnknownEpisode
+	case err != nil:
+		return err
+	}
+
+	if ep.Status != model.EpisodeCleaned {
+		episodeName := feed.EpisodeName(feedConfig, ep)
+		path := fmt.Sprintf("%s/%s", feedID, episodeName)
+
+		// Mark cleaned in BadgerDB first so any in-flight download that finishes
+		// concurrently observes EpisodeCleaned and removes its newly written file.
+		err = s.db.UpdateEpisode(feedID, episodeID, func(episode *model.Episode) error {
+			episode.Status = model.EpisodeCleaned
+			episode.Title = ""
+			episode.Description = ""
+			clearFailures(episode)
+			return nil
+		})
+		if err != nil {
+			if errors.Is(err, model.ErrNotFound) {
+				return ErrUnknownEpisode
+			}
+			return err
+		}
+
+		if err := s.fs.Delete(ctx, path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("delete episode file %q: %w", path, err)
+		}
+	}
+
+	if err := s.currentManager().buildXML(ctx, feedConfig); err != nil && !errors.Is(err, model.ErrNotFound) {
+		return err
+	}
+
+	return nil
 }

@@ -27,6 +27,8 @@ func New(ctx context.Context, provider model.Provider, key string, downloader Do
 		return NewOdyseeBuilder()
 	case model.ProviderRumble:
 		return NewRumbleBuilder(downloader)
+	case model.ProviderLocalJSON:
+		return NewLocalJSONBuilder()
 	default:
 		return nil, errors.Errorf("unsupported provider %q", provider)
 	}

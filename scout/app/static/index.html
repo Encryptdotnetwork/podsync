@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PodSync Scout — Auto Podcasts</title>
+  <link rel="stylesheet" href="./static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <h1>PodSync Scout</h1>
+        <span id="feedBadge" class="badge badge-accent">AutoPodcasts</span>
+      </div>
+      <div class="topbar-actions">
+        <span id="scanMeta" class="meta-text">Loading…</span>
+        <a href="/admin/" class="btn btn-ghost">PodSync Admin</a>
+        <button id="scanNowBtn" class="btn btn-primary" type="button">Scan Now</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <div id="authGate" class="panel hidden">
+      <h2>Authentication Required</h2>
+      <p class="muted">Enter your Scout Bearer token to manage Auto Podcasts.</p>
+      <form id="authForm" class="inline-form">
+        <input id="authTokenInput" type="password" placeholder="Bearer token" required>
+        <button type="submit" class="btn btn-primary">Sign In</button>
+      </form>
+    </div>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="added" type="button">
+        Added <span id="countAdded" class="pill">0</span>
+      </button>
+      <button class="tab" data-tab="filtered" type="button">
+        Filtered Out <span id="countFiltered" class="pill">0</span>
+      </button>
+      <button class="tab" data-tab="rules" type="button">
+        Rules &amp; Channels
+      </button>
+    </nav>
+
+    <section id="tab-added" class="tab-panel active">
+      <div class="section-header">
+        <p class="muted">Episodes automatically pushed to your <strong>Auto Podcasts</strong> feed. Click <strong>Block &amp; Purge</strong> on any junk channel to remove it immediately and never see it again.</p>
+      </div>
+      <div id="addedList" class="episode-grid"></div>
+    </section>
+
+    <section id="tab-filtered" class="tab-panel">
+      <div class="section-header">
+        <p class="muted">Videos caught by Ollama spam filtering, duration limits, or blocked channels. Rescue any false positive in one tap.</p>
+      </div>
+      <div id="filteredList" class="episode-grid"></div>
+    </section>
+
+    <section id="tab-rules" class="tab-panel">
+      <div class="rules-layout">
+        <div class="panel">
+          <h2>Watched People</h2>
+          <p class="muted">Scout searches YouTube for long-form videos matching each enabled person.</p>
+          <div id="peopleList" class="stack"></div>
+
+          <form id="addPersonForm" class="form-grid">
+            <h3>Add Person</h3>
+            <label>
+              Name
+              <input id="personName" type="text" placeholder="e.g. Jeff Snider" required>
+            </label>
+            <label>
+              Search Query (optional)
+              <input id="personQuery" type="text" placeholder='Defaults to "Name"'>
+            </label>
+            <label>
+              Min Duration (minutes)
+              <input id="personMinMins" type="number" min="1" max="600" value="20" required>
+            </label>
+            <label>
+              Max Age (days)
+              <input id="personMaxAge" type="number" min="1" max="365" value="14" required>
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Add Watched Person</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2>Ollama Spam Shield &amp; Schedule</h2>
+          <p class="muted">Unknown channels are classified by your local Ollama server before auto-adding.</p>
+          <form id="settingsForm" class="form-grid">
+            <label class="checkbox-row">
+              <input id="ollamaEnabled" type="checkbox">
+              Enable local Ollama classification
+            </label>
+            <label>
+              Ollama Model <span id="ollamaStatus" class="muted"></span>
+              <select id="ollamaModel"></select>
+            </label>
+            <label>
+              Fallback Min Subscribers (if Ollama offline/disabled)
+              <input id="fallbackMinSubs" type="number" min="0" step="1000" value="10000">
+            </label>
+            <label>
+              Scan Interval (minutes)
+              <input id="scanIntervalMins" type="number" min="15" max="10080" value="360">
+            </label>
+            <label>
+              Same-Channel Clip Window (days, 0 = off)
+              <input id="clipDedupeDays" type="number" min="0" max="30" value="5">
+            </label>
+            <div class="form-actions">
+              <button type="submit" class="btn btn-primary">Save Settings</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel full-width">
+          <h2>Managed Channels (Trusted &amp; Blocked)</h2>
+          <p class="muted">Change any channel's policy at any time. <strong>Trust Matching</strong> auto-adds videos matching a watched person; <strong>Trust All</strong> grabs every long-form upload from that channel.</p>
+          <div id="channelsList" class="stack"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="./static/app.js"></script>
+</body>
+</html>

@@ -544,6 +544,7 @@ func (s *Server) handleSyncStatus(w http.ResponseWriter, _ *http.Request) {
 const (
 	msgEpisodesFailed   = "could not list failed episodes"
 	msgRetryFailed      = "episode retry failed"
+	msgDeleteFailed     = "episode deletion failed"
 	msgEpisodeNotFailed = "episode download has not failed"
 )
 
@@ -616,5 +617,37 @@ func (s *Server) handleRetryEpisode(w http.ResponseWriter, r *http.Request) {
 	default:
 		log.WithError(err).Error("episode retry request failed")
 		writeError(w, http.StatusInternalServerError, msgRetryFailed)
+	}
+}
+
+// handleDeleteEpisode purges one episode's media file, marks it cleaned so it
+// is neither served nor re-downloaded, and rebuilds the feed XML. Returns 200
+// on success, 404 for an unknown feed or episode.
+func (s *Server) handleDeleteEpisode(w http.ResponseWriter, r *http.Request) {
+	if s.syncer == nil {
+		writeError(w, http.StatusServiceUnavailable, msgSyncUnavailable)
+		return
+	}
+
+	var (
+		feedID    = r.PathValue("id")
+		episodeID = r.PathValue("episode")
+	)
+
+	err := s.syncer.DeleteEpisode(r.Context(), feedID, episodeID)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":     "deleted",
+			"feed_id":    feedID,
+			"episode_id": episodeID,
+		})
+	case errors.Is(err, update.ErrUnknownFeed):
+		writeError(w, http.StatusNotFound, "feed not found")
+	case errors.Is(err, update.ErrUnknownEpisode):
+		writeError(w, http.StatusNotFound, "episode not found")
+	default:
+		log.WithError(err).Error("episode delete request failed")
+		writeError(w, http.StatusInternalServerError, msgDeleteFailed)
 	}
 }
