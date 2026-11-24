@@ -41,9 +41,18 @@ type Episode struct {
 	Size        int64         `json:"size"`
 	Order       string        `json:"order"`
 	Status      EpisodeStatus `json:"status"` // Disk status
-	// Retries counts failed download attempts. Episodes reaching the retry limit
-	// are skipped by future update cycles (deleted, geo-blocked or private videos).
+	// Retries counts failed download attempts since the episode was last
+	// downloaded or reset. The fields below record when the failures happened;
+	// services/update/retry.go decides from them when to try again and when to
+	// give up (deleted, geo-blocked or private videos).
 	Retries int `json:"retries,omitempty"`
+	// FirstFailedAt is when the current run of failures started.
+	FirstFailedAt time.Time `json:"first_failed_at,omitzero"`
+	// LastFailedAt is when the latest attempt failed.
+	LastFailedAt time.Time `json:"last_failed_at,omitzero"`
+	// FailedVersion is the youtube-dl version that made the latest failed
+	// attempt. A different version gets one immediate retry.
+	FailedVersion string `json:"failed_version,omitempty"`
 }
 
 type Feed struct {

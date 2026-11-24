@@ -21,7 +21,7 @@ Podsync is a Go-based service that converts YouTube, Vimeo, SoundCloud, and Twit
 - **ytdl/**: YouTube-dl wrapper for media downloading
 
 ### Services (`services/`)
-- **update/**: Feed update orchestration and scheduling (scheduler.go: cron + single-consumer update loop + config hot-reload; queue.go: two-lane de-duplicating queue; sync.go: manual "Sync now" API and in-memory status), episode filtering via matcher.go
+- **update/**: Feed update orchestration and scheduling (scheduler.go: cron + single-consumer update loop + config hot-reload; queue.go: two-lane de-duplicating queue; sync.go: manual "Sync now" API and in-memory status; retry.go: retry policy for failed downloads; episodes.go: failed-episode listing and reset for the admin API), episode filtering via matcher.go
 - **web/**: HTTP server for serving podcast feeds, media files, and health checks
 - **admin/**: Administrative HTTP API (config reads/edits, hot reload, manual sync) plus the embedded `/admin/` page (`ui/`); disabled by default, separate port unless `admin.mount_on_server`
 - **migrate/**: Filename migration tooling for transitioning to custom filename templates
@@ -52,8 +52,17 @@ Understanding how episodes flow through the system:
 - Episodes are filtered by match rules (title, description, duration, age) in `services/update/matcher.go:27-72`
 - Only `page_size` episodes are queued per update cycle (default 50)
 - Downloads happen to temp directory first, then copied to storage to prevent incomplete files
-- On success: status set to `EpisodeDownloaded` with file size recorded
-- On failure: status set to `EpisodeError`, retry attempted next cycle
+- On success: status set to `EpisodeDownloaded` with file size recorded, and the failure record cleared
+- On failure: status set to `EpisodeError`; the retry policy below decides when it is attempted again
+
+### Retry Policy for Failed Downloads (`services/update/retry.go`)
+- yt-dlp reports a temporary breakage (e.g. a YouTube player change) with the same text as a really unavailable video ("Requested format is not available"), so the policy never reads the error; it spaces attempts in time instead
+- Each failure records `Retries`, `FirstFailedAt`, `LastFailedAt` and `FailedVersion` (the yt-dlp version that made the attempt) on the episode
+- Backoff from the latest failure: 1h, 2h, 4h, 8h, 16h, then every 24h (5 minutes of slack so hourly feeds retry on the next cycle). Extra update cycles, such as the one every container restart runs, do not use up attempts. Waiting episodes don't take a `page_size` slot
+- Given up only after at least 5 failed attempts spanning at least 14 days (deleted, private or geo-blocked videos that stay listed; vanished ones are removed from the database anyway)
+- An episode whose latest failure was made by a different yt-dlp version is retried at once, waiting or given up: one attempt per version. `ytdl.YoutubeDl.Version()` is re-read after every self-update
+- Records written before this policy (Retries but no timestamps) are retried at the next update; their 14-day window starts with that attempt
+- Manual reset: `POST /admin/feeds/{id}/episodes/{episode}/retry` (admin API)
 
 ### Cleanup Phase (Important!)
 - `cleanup()` in `updater.go:373-441` runs AFTER each successful update cycle
@@ -357,6 +366,8 @@ All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy
 - `POST /admin/reload` - Re-read config.toml from disk (after hand edits)
 - `POST /admin/feeds/{id}/sync` - Queue a manual update of one feed: 202 (queued or already queued), 404 unknown feed, 429 with `Retry-After` while the feed is rate limited or was manually synced less than 30 seconds ago
 - `POST /admin/sync` - Queue every feed ("Sync all"): 202 with `queued`/`refused` lists, 429 if all were refused
+- `GET /admin/feeds/{id}/episodes/failed` - Episodes whose latest download failed, newest first: retries, first/last failure time, the yt-dlp version of the last failure, `state` (`due`, `waiting` with `next_attempt_at`, or `given_up`) and the installed yt-dlp version. Never raw error text; titles are untrusted provider metadata. 404 for an unknown feed
+- `POST /admin/feeds/{id}/episodes/{episode}/retry` - Forget one episode's failed attempts (status back to `new`) and queue a manual sync of its feed: 202 with `queued: true`, or 202 with `queued: false` plus `reason`/`retry_after` when the sync itself was refused (the next update then tries the episode); 404 unknown feed or episode; 409 if the episode's download has not failed. Not gated by `allow_config_edit`
 - `GET /admin/sync` - Per-feed status: `idle`, `queued`, `syncing`, `completed` (nothing failed), `completed_with_errors` (the update succeeded but at least one episode download failed), `no_new_episodes`, `failed` (fixed error category only, never raw error text), `rate_limited` (with `retry_after`); `busy` is true while anything is queued or syncing
 - `GET /admin/` (plus `admin.js`, `admin.css`) - The embedded admin page: unauthenticated static files served with CSP `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'`. The user types the token, it lives in `sessionStorage`, and content is rendered with `textContent` only. It shows the sync table with "Sync now" and "Sync all", polling every 2 seconds while anything is queued or syncing
 
@@ -394,7 +405,7 @@ All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy
 - HTTP 429 (rate limit): stops the current batch and puts the feed in exponential backoff (15m, 30m, 1h, capped at 2h); updates are skipped until the backoff window expires, and a successful update resets it. Backoffs survive config hot-reloads
 - Invalid `cron_schedule`: the feed is left unscheduled with an error logged; the daemon and all other feeds keep running
 - A 429 during the metadata phase does not abort the update: downloads are skipped for that cycle but the XML feed is still rebuilt from the database so the served feed stays intact
-- Download failures: episode status set to `EpisodeError` with a retry counter; retried on subsequent cycles up to 5 attempts, then skipped permanently (deleted/geo-blocked/private videos)
+- Download failures: episode status set to `EpisodeError` and retried with a time-based backoff (1h doubling to 24h); given up only after 5+ failures over 14+ days, and retried once more whenever the yt-dlp version changes. See "Retry Policy for Failed Downloads" above
 - API failures: logged, scheduler continues with other feeds
 - Download timeout: configurable via `downloader.timeout` (default 15 minutes)
 - Hooks available for error notification (`on_episode_download_error`)
@@ -554,6 +565,7 @@ This project uses golangci-lint with strict formatting rules configured in `.gol
 - Config store (hot reload, atomic writes): `pkg/config/store.go`
 - Atomic file writes: `pkg/fs/atomic.go`
 - Feed update: `services/update/updater.go` (episode lifecycle, cleanup, rate-limit backoff)
+- Download retry policy: `services/update/retry.go`; failed-episode admin operations: `services/update/episodes.go`
 - Update scheduling and hot reload: `services/update/scheduler.go`
 - Admin API: `services/admin/server.go`, `services/admin/handlers.go`
 - Admin page (embedded): `services/admin/ui.go`, `services/admin/ui/`

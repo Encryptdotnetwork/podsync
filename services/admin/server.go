@@ -5,6 +5,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -21,6 +22,8 @@ type Syncer interface {
 	SyncNow(feedID string) (update.FeedStatus, error)
 	SyncAll() (update.SyncAllResult, error)
 	Status() update.SyncStatus
+	FailedEpisodes(ctx context.Context, feedID string) (update.FailedEpisodeList, error)
+	RetryEpisode(feedID, episodeID string) (update.FeedStatus, error)
 }
 
 type Server struct {
@@ -86,6 +89,10 @@ func New(cfg config.Admin, store *config.Store, reload func() error, syncer Sync
 	handle("POST /admin/feeds/{id}/sync", srv.requireAuth(srv.handleSyncFeed))
 	handle("POST /admin/sync", srv.requireAuth(srv.handleSyncAll))
 	handle("GET /admin/sync", srv.requireAuth(srv.handleSyncStatus))
+
+	// Failed episode downloads: list them, or forget one's failures and sync
+	handle("GET /admin/feeds/{id}/episodes/failed", srv.requireAuth(srv.handleFailedEpisodes))
+	handle("POST /admin/feeds/{id}/episodes/{episode}/retry", srv.requireAuth(srv.handleRetryEpisode))
 
 	// The page and its assets are public (no secrets in them); the token is
 	// typed in the browser and sent with each API call. "{$}" matches only

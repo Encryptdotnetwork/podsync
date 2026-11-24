@@ -26,6 +26,10 @@ type Downloader interface {
 	Download(ctx context.Context, feedConfig *feed.Config, episode *model.Episode) (io.ReadCloser, error)
 	PlaylistMetadata(ctx context.Context, url string) (metadata ytdl.PlaylistMetadata, err error)
 	PlaylistEntries(ctx context.Context, url string, limit int) (metadata ytdl.PlaylistMetadata, err error)
+	// Version is the installed youtube-dl version, or "" if unknown. It changes
+	// after a self-update; the retry policy compares it with the version that
+	// made an episode's latest failed attempt.
+	Version() string
 }
 
 type TokenList []string
@@ -34,11 +38,8 @@ type TokenList []string
 // Manager so tests can substitute a fake provider instead of calling real APIs.
 type builderFactory func(ctx context.Context, provider model.Provider, key string, downloader builder.Downloader) (builder.Builder, error)
 
+// The retry policy for failed episode downloads is in retry.go.
 const (
-	// maxDownloadAttempts is how many times a failing episode is retried before
-	// being skipped permanently (deleted, geo-blocked or private videos).
-	maxDownloadAttempts = 5
-
 	// Exponential backoff applied to a feed after the platform responds with
 	// HTTP 429 (Too Many Requests): 15m, 30m, 1h, 2h, 2h, ...
 	rateLimitBackoffInitial = 15 * time.Minute
@@ -104,6 +105,9 @@ type Manager struct {
 	keys       map[model.Provider]feed.KeyProvider
 	newBuilder builderFactory
 
+	// now is the clock used for episode retry timing; replaced in tests
+	now func() time.Time
+
 	backoffMu sync.Mutex
 	backoffs  map[string]*feedBackoff // per-feed rate-limit backoff state
 }
@@ -124,6 +128,7 @@ func NewUpdater(
 		feeds:      feeds,
 		keys:       keys,
 		newBuilder: builder.New,
+		now:        time.Now,
 		backoffs:   make(map[string]*feedBackoff),
 	}, nil
 }
@@ -375,6 +380,8 @@ func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([
 		feedID       = feedConfig.ID
 		downloadList []*model.Episode
 		pageSize     = feedConfig.PageSize
+		now          = u.now()
+		version      = u.downloader.Version()
 	)
 
 	log.WithField("page_size", pageSize).Info("fetching episodes for download")
@@ -390,9 +397,22 @@ func (u *Manager) fetchEpisodes(ctx context.Context, feedConfig *feed.Config) ([
 			return nil
 		}
 
-		if episode.Status == model.EpisodeError && episode.Retries >= maxDownloadAttempts {
-			logger.Warnf("skipping: download failed %d times, giving up", episode.Retries)
-			return nil
+		if episode.Status == model.EpisodeError {
+			switch state, next := retryPlan(episode, now, version); state {
+			case retryGivenUp:
+				logger.Warnf("skipping: download failed %d times since %s, giving up until youtube-dl changes",
+					episode.Retries, episode.FirstFailedAt.Format(time.RFC3339))
+				return nil
+			case retryWaiting:
+				logger.Infof("skipping: download failed %d time(s), next attempt after %s",
+					episode.Retries, next.Format(time.RFC3339))
+				return nil
+			case retryDue:
+			}
+
+			if versionChanged(episode, version) {
+				logger.Infof("retrying: the last failure was with youtube-dl %s, now %s", episode.FailedVersion, version)
+			}
 		}
 
 		if !matchFilters(episode, &feedConfig.Filters) {
@@ -469,6 +489,7 @@ func (u *Manager) downloadEpisodes(
 			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
 				episode.Size = size
 				episode.Status = model.EpisodeDownloaded
+				clearFailures(episode)
 				return nil
 			}); err != nil {
 				logger.WithError(err).Error("failed to update file info")
@@ -486,6 +507,10 @@ func (u *Manager) downloadEpisodes(
 		// Download episode to disk
 		// We download the episode to a temp directory first to avoid downloading this file by clients
 		// while still being processed by youtube-dl (e.g. a file is being downloaded from YT or encoding in progress)
+
+		// Read the version before the attempt: a self-update cannot run during a
+		// download, but it can run right after one
+		version := u.downloader.Version()
 
 		logger.Infof("! downloading episode %s", episode.VideoURL)
 		tempFile, err := u.downloader.Download(ctx, feedConfig, episode)
@@ -523,11 +548,15 @@ func (u *Manager) downloadEpisodes(
 				}
 			}
 
+			now := u.now()
 			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
-				episode.Status = model.EpisodeError
-				episode.Retries++
-				if episode.Retries >= maxDownloadAttempts {
-					logger.Warnf("episode failed %d times, it will no longer be retried", episode.Retries)
+				recordFailure(episode, now, version)
+				if givenUp(episode) {
+					logger.Warnf("episode failed %d times since %s, it will no longer be retried unless youtube-dl changes",
+						episode.Retries, episode.FirstFailedAt.Format(time.RFC3339))
+				} else {
+					logger.Infof("episode failed %d time(s), next attempt after %s",
+						episode.Retries, nextAttempt(episode).Format(time.RFC3339))
 				}
 				return nil
 			}); err != nil {
@@ -569,6 +598,7 @@ func (u *Manager) downloadEpisodes(
 		if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
 			episode.Size = fileSize
 			episode.Status = model.EpisodeDownloaded
+			clearFailures(episode)
 			return nil
 		}); err != nil {
 			return res, err
