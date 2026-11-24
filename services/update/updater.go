@@ -110,6 +110,10 @@ type Manager struct {
 
 	backoffMu sync.Mutex
 	backoffs  map[string]*feedBackoff // per-feed rate-limit backoff state
+
+	// xmlMu serializes feed XML rebuilds between scheduled updates and concurrent
+	// admin DeleteEpisode calls so an older snapshot cannot overwrite a newer XML.
+	xmlMu sync.Mutex
 }
 
 func NewUpdater(
@@ -364,9 +368,21 @@ func (u *Manager) updateFeed(ctx context.Context, feedConfig *feed.Config) (int,
 
 	// removing episodes that are no longer available in the feed and not downloaded or cleaned
 	for id := range episodeSet {
-		log.Infof("removing episode %q", id)
-		err := u.db.DeleteEpisode(feedConfig.ID, id)
+		// Re-check current status in case a concurrent DeleteEpisode marked it
+		// EpisodeCleaned while the feed was being queried.
+		current, err := u.db.GetEpisode(ctx, feedConfig.ID, id)
 		if err != nil {
+			if errors.Is(err, model.ErrNotFound) {
+				continue
+			}
+			return discovered, err
+		}
+		if current.Status == model.EpisodeDownloaded || current.Status == model.EpisodeCleaned {
+			continue
+		}
+
+		log.Infof("removing episode %q", id)
+		if err := u.db.DeleteEpisode(feedConfig.ID, id); err != nil {
 			return discovered, err
 		}
 	}
@@ -480,13 +496,25 @@ func (u *Manager) downloadEpisodes(
 			return res, nil
 		}
 
+		// Re-check DB in case DeleteEpisode cleaned this episode while it was queued
+		if current, getErr := u.db.GetEpisode(ctx, feedID, episode.ID); getErr == nil && current.Status == model.EpisodeCleaned {
+			logger.Info("skipping episode cleaned concurrently")
+			continue
+		}
+
 		// Check whether episode already exists
-		size, err := u.fs.Size(ctx, fmt.Sprintf("%s/%s", feedID, episodeName))
+		episodePath := fmt.Sprintf("%s/%s", feedID, episodeName)
+		size, err := u.fs.Size(ctx, episodePath)
 		if err == nil {
 			logger.Infof("episode %q already exists on disk", episode.ID)
 
-			// File already exists, update file status and disk size
+			// File already exists, update file status and disk size unless cleaned concurrently
+			cleaned := false
 			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
+				if episode.Status == model.EpisodeCleaned {
+					cleaned = true
+					return nil
+				}
 				episode.Size = size
 				episode.Status = model.EpisodeDownloaded
 				clearFailures(episode)
@@ -495,9 +523,14 @@ func (u *Manager) downloadEpisodes(
 				logger.WithError(err).Error("failed to update file info")
 				return res, err
 			}
+			if cleaned {
+				if delErr := u.fs.Delete(ctx, episodePath); delErr != nil && !errors.Is(delErr, os.ErrNotExist) {
+					logger.WithError(delErr).Warn("failed to remove file for concurrently cleaned episode")
+				}
+			}
 
 			continue
-		} else if os.IsNotExist(err) {
+		} else if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
 			// Will download, do nothing here
 		} else {
 			logger.WithError(err).Error("failed to stat file")
@@ -549,7 +582,12 @@ func (u *Manager) downloadEpisodes(
 			}
 
 			now := u.now()
+			cleaned := false
 			if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
+				if episode.Status == model.EpisodeCleaned {
+					cleaned = true
+					return nil
+				}
 				recordFailure(episode, now, version)
 				if givenUp(episode) {
 					logger.Warnf("episode failed %d times since %s, it will no longer be retried unless youtube-dl changes",
@@ -563,22 +601,50 @@ func (u *Manager) downloadEpisodes(
 				return res, err
 			}
 
-			res.failed++
+			if !cleaned {
+				res.failed++
+			}
 			continue
 		}
 
 		logger.Debug("copying file")
-		fileSize, err := u.fs.Create(ctx, fmt.Sprintf("%s/%s", feedID, episodeName), tempFile)
+		fileSize, err := u.fs.Create(ctx, episodePath, tempFile)
 		tempFile.Close()
 		if err != nil {
 			logger.WithError(err).Error("failed to copy file")
 			return res, err
 		}
 
+		// Update file status in database before running hooks; if the episode was
+		// deleted concurrently during the download, discard the newly written file
+		// and preserve EpisodeCleaned.
+		cleaned := false
+		if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
+			if episode.Status == model.EpisodeCleaned {
+				cleaned = true
+				return nil
+			}
+			episode.Size = fileSize
+			episode.Status = model.EpisodeDownloaded
+			clearFailures(episode)
+			return nil
+		}); err != nil {
+			return res, err
+		}
+		if cleaned {
+			logger.Infof("episode %q was deleted during download; removing newly written file", episode.ID)
+			if delErr := u.fs.Delete(ctx, episodePath); delErr != nil && !errors.Is(delErr, os.ErrNotExist) {
+				logger.WithError(delErr).Warn("failed to remove file for concurrently deleted episode")
+			}
+			continue
+		}
+
+		logger.Infof("successfully downloaded file %q", episode.ID)
+
 		// Execute post episode download hooks
 		if len(feedConfig.PostEpisodeDownload) > 0 {
 			env := []string{
-				"EPISODE_FILE=" + fmt.Sprintf("%s/%s", feedID, episodeName),
+				"EPISODE_FILE=" + episodePath,
 				"FEED_NAME=" + feedID,
 				"EPISODE_TITLE=" + episode.Title,
 			}
@@ -592,18 +658,6 @@ func (u *Manager) downloadEpisodes(
 			}
 		}
 
-		// Update file status in database
-
-		logger.Infof("successfully downloaded file %q", episode.ID)
-		if err := u.db.UpdateEpisode(feedID, episode.ID, func(episode *model.Episode) error {
-			episode.Size = fileSize
-			episode.Status = model.EpisodeDownloaded
-			clearFailures(episode)
-			return nil
-		}); err != nil {
-			return res, err
-		}
-
 		res.downloaded++
 	}
 
@@ -612,6 +666,9 @@ func (u *Manager) downloadEpisodes(
 }
 
 func (u *Manager) buildXML(ctx context.Context, feedConfig *feed.Config) error {
+	u.xmlMu.Lock()
+	defer u.xmlMu.Unlock()
+
 	f, err := u.db.GetFeed(ctx, feedConfig.ID)
 	if err != nil {
 		return err

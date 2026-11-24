@@ -34,6 +34,15 @@ type fakeSyncer struct {
 	failedErr   error
 	failedReply update.FailedEpisodeList
 	retryErr    error
+	deleteErr   error
+}
+
+func (f *fakeSyncer) DeleteEpisode(_ context.Context, feedID, episodeID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, "delete:"+feedID+"/"+episodeID)
+	return f.deleteErr
 }
 
 func (f *fakeSyncer) FailedEpisodes(_ context.Context, feedID string) (update.FailedEpisodeList, error) {
@@ -172,7 +181,7 @@ func TestSyncFeedRefusedIs429WithRetryAfter(t *testing.T) {
 // An error from the scheduler is logged but never echoed to the client.
 func TestSyncErrorsNeverLeakDetails(t *testing.T) {
 	leaky := errors.New("provider said no: https://example.test/api?key=SECRET")
-	syncer := &fakeSyncer{syncErr: leaky, allErr: leaky, failedErr: leaky, retryErr: leaky}
+	syncer := &fakeSyncer{syncErr: leaky, allErr: leaky, failedErr: leaky, retryErr: leaky, deleteErr: leaky}
 	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, syncer)
 
 	for _, target := range []struct{ method, path string }{
@@ -180,6 +189,7 @@ func TestSyncErrorsNeverLeakDetails(t *testing.T) {
 		{http.MethodPost, "/admin/sync"},
 		{http.MethodGet, "/admin/feeds/A/episodes/failed"},
 		{http.MethodPost, "/admin/feeds/A/episodes/e1/retry"},
+		{http.MethodDelete, "/admin/feeds/A/episodes/e1"},
 	} {
 		rec := env.do(t, target.method, target.path, "", bearer)
 		assert.Equal(t, http.StatusInternalServerError, rec.Code, target.path)
@@ -250,6 +260,7 @@ func TestSyncRoutesWithoutSchedulerAre503(t *testing.T) {
 		{http.MethodGet, "/admin/sync"},
 		{http.MethodGet, "/admin/feeds/A/episodes/failed"},
 		{http.MethodPost, "/admin/feeds/A/episodes/e1/retry"},
+		{http.MethodDelete, "/admin/feeds/A/episodes/e1"},
 	} {
 		rec := env.do(t, target.method, target.path, "", bearer)
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, target.path)
@@ -423,4 +434,37 @@ func TestRetryEpisodeNeedsNoConfigEdit(t *testing.T) {
 
 	rec := env.do(t, http.MethodPost, "/admin/feeds/A/episodes/e1/retry", "", bearer)
 	assert.Equal(t, http.StatusAccepted, rec.Code)
+}
+
+func TestDeleteEpisodeOK(t *testing.T) {
+	syncer := &fakeSyncer{}
+	env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken, AllowConfigEdit: false}, syncer)
+
+	rec := env.do(t, http.MethodDelete, "/admin/feeds/A/episodes/e1", "", bearer)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var got map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "deleted", got["status"])
+	assert.Equal(t, "A", got["feed_id"])
+	assert.Equal(t, "e1", got["episode_id"])
+	assert.Equal(t, []string{"delete:A/e1"}, syncer.callList())
+}
+
+func TestDeleteEpisodeErrors(t *testing.T) {
+	for name, tt := range map[string]struct {
+		err  error
+		code int
+	}{
+		"unknown feed":    {update.ErrUnknownFeed, http.StatusNotFound},
+		"unknown episode": {update.ErrUnknownEpisode, http.StatusNotFound},
+		"internal":        {errors.New("disk full"), http.StatusInternalServerError},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := setupServerWith(t, config.Admin{Enabled: true, Token: testToken}, &fakeSyncer{deleteErr: tt.err})
+
+			rec := env.do(t, http.MethodDelete, "/admin/feeds/A/episodes/e1", "", bearer)
+			assert.Equal(t, tt.code, rec.Code, rec.Body.String())
+		})
+	}
 }

@@ -19,6 +19,7 @@ const (
 	ProviderTwitch     = Provider("twitch")
 	ProviderOdysee     = Provider("odysee")
 	ProviderRumble     = Provider("rumble")
+	ProviderLocalJSON  = Provider("localjson")
 )
 
 // Info represents data extracted from URL

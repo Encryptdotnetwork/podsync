@@ -86,7 +86,7 @@ func KeyProviders(tokens map[model.Provider]config.StringSlice) (map[model.Provi
 		keys[name] = provider
 	}
 
-	for _, provider := range []model.Provider{model.ProviderOdysee, model.ProviderSoundcloud, model.ProviderRumble} {
+	for _, provider := range []model.Provider{model.ProviderOdysee, model.ProviderSoundcloud, model.ProviderRumble, model.ProviderLocalJSON} {
 		if _, ok := keys[provider]; !ok {
 			keys[provider] = feed.NewNoOpKeyProvider()
 		}
