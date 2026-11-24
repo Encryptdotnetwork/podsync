@@ -143,35 +143,23 @@ make build
 
 ### Run via Docker Compose
 
-The Docker image runs as UID/GID `10001`. Ensure mounted `data`, `db`, and `logs` directories are writable by `10001:10001`. With a read-only root filesystem, mount an executable `tmpfs` at `/run/yt-dlp` and a writable volume at `/tmp`:
+The included [docker-compose.yml](./docker-compose.yml) runs Podsync as non-root UID/GID `10001` with a read-only root filesystem, an executable `tmpfs` at `/run/yt-dlp`, and an optional `scout` profile for [PodSync Scout](./scout/README.md).
 
-```yaml
-services:
-  podsync:
-    build: .
-    container_name: podsync
-    user: "10001:10001"
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    environment:
-      PODSYNC_ADMIN_TOKEN: ${PODSYNC_ADMIN_TOKEN}
-      PODSYNC_YOUTUBE_API_KEY: ${PODSYNC_YOUTUBE_API_KEY}
-    tmpfs:
-      - /run/yt-dlp:rw,exec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
-    volumes:
-      - ./config.toml:/app/config/config.toml:ro
-      - ./db:/app/config/db
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - podsync-tmp:/tmp
-    ports:
-      - "8080:8080"
-    command: ["--config", "/app/config/config.toml"]
+```bash
+# Pre-create writable host directories owned by UID/GID 10001
+mkdir -p data db logs scout-db scout-feeds
+chown -R 10001:10001 data db logs scout-db scout-feeds
 
-volumes:
-  podsync-tmp:
+# Start Podsync alone
+docker compose up -d --build
+
+# Or start Podsync + PodSync Scout together
+docker compose --profile scout up -d --build
 ```
+
+Pass secrets via environment variables or a `.env` file (`PODSYNC_ADMIN_TOKEN`, `PODSYNC_YOUTUBE_API_KEY`, and optionally `OLLAMA_URL`, `OLLAMA_MODEL`, `SCOUT_TOKEN`). Both `/admin/` (port `8095` standalone, or `/admin/` on `8080` with `mount_on_server = true`) and `/scout/` (port `8096`, bound to `127.0.0.1` by default) should only be exposed on your private LAN/VPN.
+
+If you run behind **Traefik**, see [docker-compose.traefik.example.yml](./docker-compose.traefik.example.yml) for a full example that keeps RSS feeds public while restricting `/admin` and `/scout` to your LAN/VPN with Traefik `ipAllowList` and router priorities.
 
 ### 🗂️ Filename Migration
 

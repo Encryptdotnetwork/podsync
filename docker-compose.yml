@@ -1,16 +1,86 @@
+# Run Podsync alone:
+#   docker compose up -d --build
+#
+# Run Podsync + PodSync Scout (automated YouTube interview discovery):
+#   docker compose --profile scout up -d --build
+#
+# Both containers run as non-root UID/GID 10001. Before first start, create
+# and chown the writable host directories:
+#   mkdir -p data db logs scout-db scout-feeds
+#   chown -R 10001:10001 data db logs scout-db scout-feeds
+
 services:
   podsync:
+    build: .
     container_name: podsync
-    image: mxpv/podsync:latest
-    restart: always
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
-      - 8080:8080
+      # Podcast RSS feeds, media files, and /admin/ (when admin.mount_on_server = true)
+      - "8080:8080"
+      # Standalone Admin UI/API port (when admin.mount_on_server = false).
+      # Keep bound to localhost or a private LAN/VPN reverse proxy.
+      # - "127.0.0.1:8095:8095"
+    environment:
+      PODSYNC_ADMIN_TOKEN: ${PODSYNC_ADMIN_TOKEN:-}
+      PODSYNC_YOUTUBE_API_KEY: ${PODSYNC_YOUTUBE_API_KEY:-}
+      # PODSYNC_VIMEO_API_KEY: ${PODSYNC_VIMEO_API_KEY:-}
+      # PODSYNC_SOUNDCLOUD_API_KEY: ${PODSYNC_SOUNDCLOUD_API_KEY:-}
+      # PODSYNC_TWITCH_API_KEY: ${PODSYNC_TWITCH_API_KEY:-}
+    tmpfs:
+      - /run/yt-dlp:rw,exec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
     volumes:
-      - ./data:/app/data/
-      - ./db:/app/db/
-      - ./config.toml:/app/config.toml
-    # environment:
-    #   - PODSYNC_YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
-    #   - PODSYNC_VIMEO_API_KEY=${VIMEO_API_KEY}
-    #   - PODSYNC_SOUNDCLOUD_API_KEY=${SOUNDCLOUD_API_KEY}
-    #   - PODSYNC_TWITCH_API_KEY=${TWITCH_API_KEY}
+      - ./config.toml:/app/config/config.toml:ro
+      - ./db:/app/config/db
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./scout-feeds:/app/scout:ro
+      - podsync-tmp:/tmp
+    command: ["--config", "/app/config/config.toml", "--no-banner"]
+
+  # Optional companion service for automated YouTube interview discovery.
+  # Start with: docker compose --profile scout up -d --build
+  podsync-scout:
+    build: ./scout
+    container_name: podsync-scout
+    profiles:
+      - scout
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - podsync
+    ports:
+      # Bound to localhost by default. Expose /scout only on your private LAN/VPN
+      # via reverse proxy (do NOT use StripPrefix on /scout).
+      - "127.0.0.1:8096:8080"
+    environment:
+      YOUTUBE_API_KEY: ${PODSYNC_YOUTUBE_API_KEY:-}
+      # Use http://podsync:8080 if admin.mount_on_server = true in config.toml
+      PODSYNC_ADMIN_URL: ${PODSYNC_ADMIN_URL:-http://podsync:8095}
+      PODSYNC_ADMIN_TOKEN: ${PODSYNC_ADMIN_TOKEN:-}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      SCOUT_BASE_PATH: ${SCOUT_BASE_PATH:-/scout}
+      SCOUT_TOKEN: ${SCOUT_TOKEN:-}
+      SCOUT_FEED_ID: ${SCOUT_FEED_ID:-AutoPodcasts}
+      SCOUT_FEED_TITLE: ${SCOUT_FEED_TITLE:-Auto Podcasts}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+    volumes:
+      - ./scout-db:/data/db
+      - ./scout-feeds:/data/feeds
+
+volumes:
+  podsync-tmp:

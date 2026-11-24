@@ -24,7 +24,7 @@ Companion Docker service for PodSync that automatically discovers full-length Yo
 | Variable | Default | Description |
 | --- | --- | --- |
 | `YOUTUBE_API_KEY` | *(required)* | YouTube Data API v3 key(s), space-separated (also reads `PODSYNC_YOUTUBE_API_KEY`) |
-| `PODSYNC_ADMIN_URL` | `http://podsync:8095` | Internal PodSync admin API base URL (use port `8089` when `admin.mount_on_server = true`) |
+| `PODSYNC_ADMIN_URL` | `http://podsync:8095` | Internal PodSync admin API base URL (use `server.port`, e.g. `8080`, when `admin.mount_on_server = true`) |
 | `PODSYNC_ADMIN_TOKEN` | *(recommended)* | Matches PodSync `PODSYNC_ADMIN_TOKEN` for immediate sync & episode purge |
 | `OLLAMA_URL` | `http://localhost:11434` | Local Ollama server base URL |
 | `OLLAMA_MODEL` | `llama3.1:8b` | Default Ollama model (changeable in UI from live `/api/tags`) |
@@ -66,7 +66,7 @@ All mutating (`POST`/`PUT`/`DELETE`) requests require the header `X-Scout-Reques
    format = "audio"
    clean = { keep_last = 30 }
    ```
-3. Expose `/scout` **only** to your private LAN/VPN via reverse proxy (for example Traefik `Host(\`podsync.example.com\`) && PathPrefix(\`/scout\`)` with an IP allowlist middleware and **no** `StripPrefix`).
+3. Expose `/scout` **only** to your private LAN/VPN via reverse proxy (for example Traefik `Host(\`podsync.example.com\`) && PathPrefix(\`/scout\`)` with an IP allowlist middleware and **no** `StripPrefix` — see [../docker-compose.traefik.example.yml](../docker-compose.traefik.example.yml)).
 
 ## Development & Tests
 
