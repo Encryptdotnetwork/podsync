@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Podsync is a Go-based service that converts YouTube, Vimeo, SoundCloud, and Twitch channels into podcast feeds. It downloads video/audio content and generates RSS feeds that can be consumed by podcast clients.
+Podsync is a Go-based service that converts YouTube, Vimeo, Odysee, Rumble, SoundCloud, Twitch, and local JSON playlist sources into podcast feeds. It downloads video/audio content and generates RSS feeds that can be consumed by podcast clients. The repository also includes an optional Python companion service (`scout/`) for automated YouTube interview discovery.
 
 ## Key Architecture Components
 
@@ -13,7 +13,7 @@ Podsync is a Go-based service that converts YouTube, Vimeo, SoundCloud, and Twit
 - **config.go**: TOML configuration loading and validation with defaults
 
 ### Core Packages (`pkg/`)
-- **builder/**: Media downloaders for different platforms (YouTube, Vimeo, SoundCloud, Twitch)
+- **builder/**: Media builders for supported platforms (YouTube, Vimeo, Odysee, Rumble, SoundCloud, Twitch, Local JSON)
 - **feed/**: RSS/podcast feed generation and management, OPML export, hooks, API key rotation
 - **db/**: BadgerDB-based storage for metadata and state
 - **fs/**: Storage abstraction supporting local filesystem and S3-compatible storage
@@ -29,6 +29,16 @@ Podsync is a Go-based service that converts YouTube, Vimeo, SoundCloud, and Twit
 ### Configuration Engine (`pkg/config/`)
 - **config.go**: TOML configuration model, loading, defaults, env overrides and validation
 - **store.go**: Runtime owner of config.toml — thread-safe read/mutate/validate/atomic-write with ETag-based concurrency control; publishes new snapshots to a coalescing reload channel consumed by the update scheduler
+
+### Companion Service (`scout/`)
+- **app/main.py**: FastAPI app factory (`create_app`), background scan scheduler, security headers, CSRF/Bearer auth middleware, and `/scout/` UI + REST API routes
+- **app/scanner.py**: Discovery orchestration, 3-tier channel policy evaluation, English-only pre-filter, longest-first same-channel clip detection, batched Ollama classification, and feed updates
+- **app/youtube.py**: YouTube Data API v3 client with key rotation, search, video detail/duration parsing, and channel subscriber/uploads lookup
+- **app/ollama.py**: Local Ollama `/api/chat` and `/api/tags` client with prompt-injection delimiting, `<think>` stripping, and subscriber-count fallback
+- **app/feed_writer.py**: Atomic JSON playlist writer consumed by Podsync's `LocalJSONBuilder`
+- **app/podsync_client.py**: Podsync Admin API client for triggering sync (`POST /admin/feeds/{id}/sync`, with `429 Retry-After` coalesced retry) and purging episodes (`DELETE /admin/feeds/{id}/episodes/{episode}`)
+- **app/db.py**: SQLite persistence (`episodes`, `channels`, `people`, `settings`, `scan_runs`)
+- **app/static/**: Vanilla JS/CSS triage UI rendered via DOM APIs only (`textContent`, never `innerHTML`)
 
 ### Key Dependencies
 - youtube-dl/yt-dlp for media downloading
@@ -387,6 +397,24 @@ All management routes use the `/admin` path prefix (NOT `/api`) so reverse-proxy
 - Replacing a section or feed replaces its block wholesale, including comments inside that block; comments elsewhere in the file are preserved.
 - The config file's *directory* (not the file) must be bind-mounted in Docker, because atomic rename replaces the file inode.
 
+## PodSync Scout (`scout/`)
+
+An optional Python 3.12 / FastAPI companion container (`scout/Dockerfile`, UID/GID `10001`, read-only rootfs) that discovers full-length YouTube interviews for watched people/queries, writes an atomic local JSON playlist (`AutoPodcasts.json`) read by Podsync via `file:///app/scout/AutoPodcasts.json`, and calls Podsync's Admin API to trigger syncs and purge unwanted episodes.
+
+### Discovery & Filtering Pipeline (`scout/app/scanner.py`)
+- **Channel Policies** (by YouTube `channel_id`): `trusted_matching` (auto-accept videos matching a watched person, skipping LLM), `trusted_all` (poll channel uploads playlist for all long-form videos), `blocked` (drop silently forever; blocking via UI/API can purge existing episodes), and `neutral` (must pass filters + Ollama).
+- **Duration & Livestream Guards**: Enforces per-person `min_duration_sec` and filters active/upcoming livestreams and zero-duration entries.
+- **English-Only Pre-Filter**: Drops non-English `defaultAudioLanguage`/`defaultLanguage` metadata, foreign-language mirror channel names, and non-Latin titles before invoking Ollama.
+- **Same-Channel Clip Detector**: Sorts candidate videos longest-first and drops shorter excerpts (`<= 65%` duration and `>= 10 min` shorter) from the same channel matching the same guest within `clip_dedupe_days` (default `5`, configurable in UI/settings), even on trusted channels.
+- **Local Ollama Spam Shield (`scout/app/ollama.py`)**: Classifies unknown channels in back-to-back batches via `/api/chat` (`think: false`), wrapping untrusted YouTube metadata in `<untrusted_metadata>` tags and stripping `<think>` blocks / handling negated verdicts. Falls back to a configurable channel subscriber threshold (`fallback_min_subscribers`) if Ollama is disabled or unreachable.
+
+### Web UI, API & Security (`scout/app/main.py`)
+- Served under `SCOUT_BASE_PATH` (default `/scout`); reverse proxies must **not** apply `StripPrefix` on `/scout`.
+- Restrict `/scout` to private LAN/VPN only (see `docker-compose.traefik.example.yml`).
+- All mutating endpoints (`POST`/`PUT`/`DELETE`) require `X-Scout-Request: 1` (plus `Sec-Fetch-Site` check) and optional `Authorization: Bearer <SCOUT_TOKEN>`. Responses include strict CSP and `X-Frame-Options: DENY`.
+- `POST /scout/api/scan` runs asynchronously (`202 Accepted`; add `?wait=true` for synchronous execution) while the UI polls `/scout/api/status`.
+- Startup uses `uvicorn app.main:create_app --factory` so config/DB initialization is deferred until runtime (safe for pytest isolation).
+
 ## Storage Behavior
 
 ### Local Storage
@@ -449,9 +477,12 @@ make                # Build and run tests
 
 ### Testing
 ```bash
-make test           # Run all unit tests
-go test -v ./...    # Run tests with verbose output
-go test ./pkg/...   # Test specific packages
+make test           # Run all Go unit tests
+go test -v ./...    # Run Go tests with verbose output
+go test ./pkg/...   # Test specific Go packages
+
+# PodSync Scout (Python) tests
+cd scout && pip install -r requirements-dev.txt && pytest -v
 ```
 
 ### Linting and Formatting
@@ -473,10 +504,11 @@ goimports -w .      # Organize imports and format
 
 ### Docker
 ```bash
-make docker                           # Build local Docker image
-docker run -it --rm localhost/podsync:latest
+make docker                                     # Build local Podsync image
+docker compose up -d --build                    # Run Podsync alone
+docker compose --profile scout up -d --build    # Run Podsync + PodSync Scout
 ```
-The image runs as UID/GID 10001 (`podsync`), so mounted data/db/config must be readable (and data/db/secrets writable) by that UID. `docker-entrypoint.sh` copies the pinned, checksum-verified yt-dlp from `/opt/yt-dlp` to `/run/yt-dlp` on each start so `self_update` can rewrite it; with a read-only root filesystem, mount a tmpfs (with `exec`) at `/run/yt-dlp` and a writable disk-backed volume at `/tmp` (downloads in progress, yt-dlp/deno caches). Bump `YTDLP_VERSION`/`YTDLP_SHA256` in the Dockerfile together.
+See `docker-compose.yml` for the hardened standalone/profile setup and `docker-compose.traefik.example.yml` for Traefik v3 routing (public feeds + LAN-restricted `/admin` and `/scout`). Both images run as UID/GID 10001 (`podsync`), so mounted data/db/logs/scout directories must be writable by `10001:10001`. `docker-entrypoint.sh` copies the pinned, checksum-verified yt-dlp from `/opt/yt-dlp` to `/run/yt-dlp` on each start so `self_update` can rewrite it; with a read-only root filesystem, mount a tmpfs (with `exec`) at `/run/yt-dlp` and a writable disk-backed volume at `/tmp` (downloads in progress, yt-dlp/deno caches). Bump `YTDLP_VERSION`/`YTDLP_SHA256` in the Dockerfile together.
 
 ### Development Debugging
 Use VS Code with the Go extension. The repository includes `.vscode/launch.json` with a "Debug Podsync" configuration that runs with `config.toml`.
@@ -594,3 +626,5 @@ This project uses golangci-lint with strict formatting rules configured in `.gol
 - youtube-dl wrapper: `pkg/ytdl/ytdl.go`
 - Hooks: `pkg/feed/hooks.go`
 - API key rotation: `pkg/feed/key.go`
+- Scout service: `scout/app/main.py`, `scout/app/scanner.py`, `scout/app/ollama.py`, `scout/app/db.py`, `scout/tests/test_scout.py`
+- Docker Compose: `docker-compose.yml`, `docker-compose.traefik.example.yml`
