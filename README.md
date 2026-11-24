@@ -159,6 +159,8 @@ docker compose --profile scout up -d --build
 
 Pass secrets via environment variables or a `.env` file (`PODSYNC_ADMIN_TOKEN`, `PODSYNC_YOUTUBE_API_KEY`, and optionally `OLLAMA_URL`, `OLLAMA_MODEL`, `SCOUT_TOKEN`). Both `/admin/` (port `8095` standalone, or `/admin/` on `8080` with `mount_on_server = true`) and `/scout/` (port `8096`, bound to `127.0.0.1` by default) should only be exposed on your private LAN/VPN.
 
+If you run behind **Traefik**, see [docker-compose.traefik.example.yml](./docker-compose.traefik.example.yml) for a full example that keeps RSS feeds public while restricting `/admin` and `/scout` to your LAN/VPN with Traefik `ipAllowList` and router priorities.
+
 ### 🗂️ Filename Migration
 
 If you change `filename_template` and want to rename existing downloaded files:

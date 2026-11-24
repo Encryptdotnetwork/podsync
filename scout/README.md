@@ -66,7 +66,7 @@ All mutating (`POST`/`PUT`/`DELETE`) requests require the header `X-Scout-Reques
    format = "audio"
    clean = { keep_last = 30 }
    ```
-3. Expose `/scout` **only** to your private LAN/VPN via reverse proxy (for example Traefik `Host(\`podsync.example.com\`) && PathPrefix(\`/scout\`)` with an IP allowlist middleware and **no** `StripPrefix`).
+3. Expose `/scout` **only** to your private LAN/VPN via reverse proxy (for example Traefik `Host(\`podsync.example.com\`) && PathPrefix(\`/scout\`)` with an IP allowlist middleware and **no** `StripPrefix` — see [../docker-compose.traefik.example.yml](../docker-compose.traefik.example.yml)).
 
 ## Development & Tests
 

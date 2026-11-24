@@ -1,0 +1,142 @@
+# Example self-contained Docker Compose stack for running Podsync + PodSync Scout
+# behind Traefik v3 with:
+#   - Public access to podcast RSS feeds & media:  https://podsync.example.com/<feed>.xml
+#   - LAN/VPN-only access to the Admin UI/API:     https://podsync.example.com/admin/
+#   - LAN/VPN-only access to the Scout UI/API:     https://podsync.example.com/scout/
+#
+# Prerequisites:
+#   1. A running Traefik instance attached to an external Docker network named "proxy"
+#      with an HTTPS entrypoint named "websecure" and a certResolver named "letsencrypt"
+#      (adjust those label values below to match your Traefik setup).
+#   2. In config.toml, set:
+#        [server]
+#        port = 8080
+#        hostname = "https://podsync.example.com"
+#
+#        [admin]
+#        enabled = true
+#        mount_on_server = true
+#        allow_config_edit = false
+#   3. Create and chown the writable host directories to UID/GID 10001:
+#        mkdir -p data db logs scout-db scout-feeds
+#        chown -R 10001:10001 data db logs scout-db scout-feeds
+#   4. Copy this file (e.g. to docker-compose.yml) and provide a .env file with:
+#        PODSYNC_DOMAIN=podsync.example.com
+#        PODSYNC_ADMIN_TOKEN=<random-32+-char-token>
+#        PODSYNC_YOUTUBE_API_KEY=<your-youtube-api-key>
+#        OLLAMA_URL=http://host.docker.internal:11434
+#        OLLAMA_MODEL=llama3.1:8b
+#        SCOUT_TOKEN=<optional-bearer-token>
+
+services:
+  podsync:
+    build: .
+    container_name: podsync
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PODSYNC_ADMIN_TOKEN: ${PODSYNC_ADMIN_TOKEN}
+      PODSYNC_YOUTUBE_API_KEY: ${PODSYNC_YOUTUBE_API_KEY}
+      # PODSYNC_VIMEO_API_KEY: ${PODSYNC_VIMEO_API_KEY:-}
+      # PODSYNC_SOUNDCLOUD_API_KEY: ${PODSYNC_SOUNDCLOUD_API_KEY:-}
+      # PODSYNC_TWITCH_API_KEY: ${PODSYNC_TWITCH_API_KEY:-}
+    tmpfs:
+      - /run/yt-dlp:rw,exec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+    volumes:
+      - ./config.toml:/app/config/config.toml:ro
+      - ./db:/app/config/db
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./scout-feeds:/app/scout:ro
+      - podsync-tmp:/tmp
+    command: ["--config", "/app/config/config.toml", "--no-banner"]
+    networks:
+      - proxy
+      - podsync-internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+
+      # Inline LAN/VPN IP allowlist middleware (Traefik v3).
+      # Replace "podsync-lan-only" with your existing file-provider middleware
+      # (e.g. "lan-allowlist@file") if you already define one globally.
+      - "traefik.http.middlewares.podsync-lan-only.ipallowlist.sourcerange=127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+      # 1) Public router for podcast feeds and media downloads
+      - "traefik.http.routers.podsync.rule=Host(`${PODSYNC_DOMAIN:-podsync.example.com}`)"
+      - "traefik.http.routers.podsync.entrypoints=websecure"
+      - "traefik.http.routers.podsync.tls=true"
+      - "traefik.http.routers.podsync.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.podsync.priority=100"
+      - "traefik.http.routers.podsync.service=podsync"
+
+      # 2) Restricted router for /admin/ (higher priority than public router)
+      - "traefik.http.routers.podsync-admin.rule=Host(`${PODSYNC_DOMAIN:-podsync.example.com}`) && PathPrefix(`/admin`)"
+      - "traefik.http.routers.podsync-admin.entrypoints=websecure"
+      - "traefik.http.routers.podsync-admin.tls=true"
+      - "traefik.http.routers.podsync-admin.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.podsync-admin.priority=150"
+      - "traefik.http.routers.podsync-admin.middlewares=podsync-lan-only"
+      - "traefik.http.routers.podsync-admin.service=podsync"
+
+      - "traefik.http.services.podsync.loadbalancer.server.port=8080"
+
+  podsync-scout:
+    build: ./scout
+    container_name: podsync-scout
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - podsync
+    environment:
+      YOUTUBE_API_KEY: ${PODSYNC_YOUTUBE_API_KEY}
+      # Matches server.port when admin.mount_on_server = true
+      PODSYNC_ADMIN_URL: http://podsync:8080
+      PODSYNC_ADMIN_TOKEN: ${PODSYNC_ADMIN_TOKEN}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+      SCOUT_BASE_PATH: /scout
+      SCOUT_TOKEN: ${SCOUT_TOKEN:-}
+      SCOUT_FEED_ID: ${SCOUT_FEED_ID:-AutoPodcasts}
+      SCOUT_FEED_TITLE: ${SCOUT_FEED_TITLE:-Auto Podcasts}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+    volumes:
+      - ./scout-db:/data/db
+      - ./scout-feeds:/data/feeds
+    networks:
+      - proxy
+      - podsync-internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+
+      # 3) Restricted router for /scout/ (higher priority; do NOT use StripPrefix)
+      - "traefik.http.routers.podsync-scout.rule=Host(`${PODSYNC_DOMAIN:-podsync.example.com}`) && PathPrefix(`/scout`)"
+      - "traefik.http.routers.podsync-scout.entrypoints=websecure"
+      - "traefik.http.routers.podsync-scout.tls=true"
+      - "traefik.http.routers.podsync-scout.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.podsync-scout.priority=200"
+      - "traefik.http.routers.podsync-scout.middlewares=podsync-lan-only"
+      - "traefik.http.routers.podsync-scout.service=podsync-scout"
+      - "traefik.http.services.podsync-scout.loadbalancer.server.port=8080"
+
+volumes:
+  podsync-tmp:
+
+networks:
+  proxy:
+    external: true
+  podsync-internal: {}
